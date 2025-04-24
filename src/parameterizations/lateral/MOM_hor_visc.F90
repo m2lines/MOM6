@@ -25,7 +25,7 @@ use MOM_unit_scaling,          only : unit_scale_type
 use MOM_verticalGrid,          only : verticalGrid_type
 use MOM_variables,             only : accel_diag_ptrs, thermo_var_ptrs
 use MOM_Zanna_Bolton,          only : ZB2020_lateral_stress, ZB2020_init, ZB2020_end
-use MOM_Zanna_Bolton,          only : ZB2020_CS, ZB2020_copy_gradient_and_thickness
+use MOM_Zanna_Bolton,          only : ZB2020_CS, ZB2020_copy_gradient_and_thickness, true_vorticity
 
 implicit none ; private
 
@@ -958,9 +958,18 @@ subroutine horizontal_viscosity(u, v, h, uh, vh, diffu, diffv, MEKE, VarMix, G, 
           vort_xy(I,J) = (2.0-G%mask2dBu(I,J)) * ( dvdx(I,J) - dudy(I,J) )
         enddo ; enddo
       else
-        do J=js_vort,je_vort ; do I=is_vort,ie_vort
-          vort_xy(I,J) = G%mask2dBu(I,J) * ( dvdx(I,J) - dudy(I,J) )
-        enddo ; enddo
+        if (true_vorticity) then
+          do J=js_vort,je_vort ; do I=is_vort,ie_vort
+            vort_xy(I,J) = G%mask2dBu(I,J) * G%IareaBu(I,J) * (  &
+              (v(i+1,J,k)*G%dyCv(i+1,J) - v(i,J,k)*G%dyCv(i,J))  &
+            - (u(I,j+1,k)*G%dxCu(I,j+1) - u(I,j,k)*G%dxCu(I,j))  &
+             )
+          enddo ; enddo
+        else
+          do J=js_vort,je_vort ; do I=is_vort,ie_vort
+            vort_xy(I,J) = G%mask2dBu(I,J) * ( dvdx(I,J) - dudy(I,J) )
+          enddo ; enddo
+        endif
       endif
     endif
 
