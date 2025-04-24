@@ -217,12 +217,15 @@ subroutine Layer_apply(x, y, layer)
 
   integer :: i, j
 
-  do j=1,layer%output_width
-    y(j) = 0.
-    do i=1,layer%input_width
+  y(:) = 0.
+  do i=1,layer%input_width
+    do j=1,layer%output_width
       ! Multiply by kernel
       y(j) = y(j) + ( x(i) * layer%A(j, i) )
     enddo
+  enddo
+
+  do j=1,layer%output_width
     ! Add bias
     y(j) = y(j) + layer%b(j)
     ! Apply activation function
