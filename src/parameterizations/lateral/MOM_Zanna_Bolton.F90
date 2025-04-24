@@ -715,7 +715,7 @@ subroutine compute_stress_ANN_collocated(G, GV, CS)
 
       vort_xy_h(i,j,k) = 0.25 * ( (CS%vort_xy(I-1,J-1,k) + CS%vort_xy(I,J,k)) &
                                 + (CS%vort_xy(I-1,J,k) + CS%vort_xy(I,J-1,k)) )
-   
+
       sqr_h(i,j) = (CS%sh_xx(i,j,k)**2 + sh_xy_h(i,j,k)**2 + vort_xy_h(i,j,k)**2) * G%mask2dT(i,j)
     enddo; enddo
 
