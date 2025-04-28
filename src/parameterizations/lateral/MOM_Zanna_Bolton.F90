@@ -23,8 +23,6 @@ implicit none ; private
 
 public ZB2020_lateral_stress, ZB2020_init, ZB2020_end, ZB2020_copy_gradient_and_thickness
 
-logical, public :: true_vorticity !< Use correct curvilinear coordinate expression for vorticity
-
 !> Control structure for Zanna-Bolton-2020 parameterization.
 type, public :: ZB2020_CS ; private
   ! Parameters
@@ -79,11 +77,11 @@ type, public :: ZB2020_CS ; private
         maskw_h,  & !< Mask of land point at h points multiplied by filter weight [nondim]
         maskw_q     !< Same mask but for q points [nondim]
 
-  integer :: use_ann  !< 0: ANN is turned off, 3: ANN is used
+  logical :: use_ann  !< If True, momentum fluxes are inferred with ANN
   integer :: stencil_size  !< Default is 3x3
   type(ANN_CS) :: ann_Tall !< ANN instance for off-diagonal and diagonal stress
   character(len=200) :: ann_file_Tall !< Path to netcdf file with ANN
-  real :: subroundoff_shear !< Small dimensional constant for save division by zero [T-1 ~ s-1]
+  real :: subroundoff_shear !< Small dimensional constant for save division by zero [T-1 ~> s-1]
 
   type(diag_ctrl), pointer :: diag => NULL() !< A type that regulates diagnostics output
   !>@{ Diagnostic handles
@@ -151,17 +149,13 @@ subroutine ZB2020_init(Time, G, GV, US, param_file, diag, CS, use_ZB2020)
                  "subgrid momentum parameterization of mesoscale eddies.", default=.false.)
   if (.not. use_ZB2020) return
 
-  call get_param(param_file, mdl, "USE_ANN", CS%use_ann, &
-                 "ANN inference of momentum fluxes: 0 off, 3: use ANN", default=0)
+  call get_param(param_file, mdl, "ZB2020_USE_ANN", CS%use_ann, &
+                 "ANN inference of momentum fluxes", default=.false.)
 
-  call get_param(param_file, mdl, "ANN_STENCIL_SIZE", CS%stencil_size, &
+  call get_param(param_file, mdl, "ZB2020_ANN_STENCIL_SIZE", CS%stencil_size, &
                  "ANN stencil size", default=3)
 
-  call get_param(param_file, mdl, "ANN_TRUE_VORTICITY", true_vorticity, &
-                 "Use correct curvilinear approximation of vorticity", &
-                 default=.False.)
-
-  call get_param(param_file, mdl, "ANN_FILE_TALL", CS%ann_file_Tall, &
+  call get_param(param_file, mdl, "ZB2020_ANN_FILE_TALL", CS%ann_file_Tall, &
                  "ANN parameters for prediction of Txy, Txx and Tyy netcdf input", &
                  default="INPUT/EXP1/Tall.nc")
 
@@ -246,7 +240,7 @@ subroutine ZB2020_init(Time, G, GV, US, param_file, diag, CS, use_ZB2020)
   CS%id_clock_source = cpu_clock_id('(ZB2020 compute energy source)', grain=CLOCK_ROUTINE, sync=.false.)
 
   CS%subroundoff_shear = 1e-30 * US%T_to_s
-  if (CS%use_ann == 3) then
+  if (CS%use_ann) then
     call ANN_init(CS%ann_Tall, CS%ann_file_Tall)
   endif
 
@@ -348,7 +342,7 @@ subroutine ZB2020_end(CS)
     deallocate(CS%maskw_q)
   endif
 
-  if (CS%use_ann == 3) then
+  if (CS%use_ann) then
     call ANN_end(CS%ann_Tall)
   endif
 
@@ -466,12 +460,11 @@ subroutine ZB2020_lateral_stress(u, v, h, diffu, diffv, G, GV, CS, &
 
   ! Compute the stress tensor given the
   ! (optionally sharpened) velocity gradients
-  if (CS%use_ann==0) then
-    call compute_stress(G, GV, CS)
-  elseif (CS%use_ann==3) then
+  if (CS%use_ann) then
     call compute_stress_ANN_collocated(G, GV, CS)
+  else
+    call compute_stress(G, GV, CS)
   endif
-
 
   ! Smooth the stress tensor if specified
   call filter_stress(G, GV, CS)
@@ -672,23 +665,25 @@ subroutine compute_stress_ANN_collocated(G, GV, CS)
 
   integer :: is, ie, js, je, Isq, Ieq, Jsq, Jeq, nz
   integer :: i, j, k, n
+  integer :: ii, jj
 
   real :: x(3*CS%stencil_size**2)    ! Vector of non-dimensional input features
                                      ! (sh_xy, sh_xx, vort_xy) on a stencil    [nondim]
   real :: y(3)                       ! Vector of nondimensional
                                      ! output features (Txy,Txx,Tyy) [nondim]
-  real :: input_norm                 ! Norm of input features [T-1 ~ s-1]
+  real :: input_norm                 ! Norm of input features [T-1 ~> s-1]
+  real :: tmp                        ! Temporal value of squared norm [T-2 ~> s-2]
   integer :: offset                  ! Half the stencil size. Used for selection
   integer :: stencil_points          ! The number of points after flattening
 
   real, dimension(SZI_(G),SZJ_(G),SZK_(GV)) :: &
-        sh_xy_h,   & ! sh_xy interpolated to the center [T-1 ~ s-1]
-        vort_xy_h, & ! vort_xy interpolated to the center [T-1 ~ s-1]
-        norm_h       ! Norm of input feautres in center points [T-1 ~ s-1]
+        sh_xy_h,   & ! sh_xy interpolated to the center [T-1 ~> s-1]
+        vort_xy_h, & ! vort_xy interpolated to the center [T-1 ~> s-1]
+        norm_h       ! Norm of input feautres in center points [T-1 ~> s-1]
 
   real, dimension(SZI_(G),SZJ_(G)) :: &
-        sqr_h, & ! Squared norm of velocity gradients in center points [T-2 ~ s-2]
-        Txy      ! Predicted Txy in center points                      [T-1 ~ s-1]
+        sqr_h, & ! Squared norm of velocity gradients in center points [T-2 ~> s-2]
+        Txy      ! Predicted Txy in center points                      [T-1 ~> s-1]
 
   call cpu_clock_begin(CS%id_clock_stress_ANN)
 
@@ -720,8 +715,11 @@ subroutine compute_stress_ANN_collocated(G, GV, CS)
     enddo; enddo
 
     do j=js,je ; do i=is,ie
-      norm_h(i,j,k) = sqrt(SUM(sqr_h(i-offset:i+offset, &
-                                     j-offset:j+offset)))
+      tmp = 0.0
+      do jj=j-offset,j+offset; do ii=i-offset,i+offset
+        tmp = tmp + sqr_h(ii,jj)
+      enddo; enddo
+      norm_h(i,j,k) = sqrt(tmp)
     enddo; enddo
   enddo
 
@@ -747,7 +745,7 @@ subroutine compute_stress_ANN_collocated(G, GV, CS)
 
       call ANN_apply(x, y, CS%ann_Tall)
 
-      y = y * input_norm * input_norm * CS%kappa_h(i,j)
+      y(:) = y(:) * input_norm * input_norm * CS%kappa_h(i,j)
 
       Txy(i,j)      = y(1)
       CS%Txx(i,j,k) = y(2)

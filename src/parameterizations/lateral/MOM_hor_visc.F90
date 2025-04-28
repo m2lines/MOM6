@@ -25,7 +25,7 @@ use MOM_unit_scaling,          only : unit_scale_type
 use MOM_verticalGrid,          only : verticalGrid_type
 use MOM_variables,             only : accel_diag_ptrs, thermo_var_ptrs
 use MOM_Zanna_Bolton,          only : ZB2020_lateral_stress, ZB2020_init, ZB2020_end
-use MOM_Zanna_Bolton,          only : ZB2020_CS, ZB2020_copy_gradient_and_thickness, true_vorticity
+use MOM_Zanna_Bolton,          only : ZB2020_CS, ZB2020_copy_gradient_and_thickness
 
 implicit none ; private
 
@@ -132,6 +132,7 @@ type, public :: hor_visc_CS ; private
   logical :: use_cont_thick_bug  !< If true, retain an answer-changing bug for thickness at velocity points.
   type(ZB2020_CS) :: ZB2020  !< Zanna-Bolton 2020 control structure.
   logical :: use_ZB2020      !< If true, use Zanna-Bolton 2020 parameterization.
+  logical :: use_circulation !< If true, use circulation theorem to compute vorticity (for ZB20 or Leith)
 
   real ALLOCABLE_, dimension(NIMEM_,NJMEM_) :: Kh_bg_xx
                       !< The background Laplacian viscosity at h points [L2 T-1 ~> m2 s-1].
@@ -671,8 +672,7 @@ subroutine horizontal_viscosity(u, v, h, uh, vh, diffu, diffv, MEKE, VarMix, G, 
   !$OMP   h_neglect, h_neglect3, inv_PI3, inv_PI6, &
   !$OMP   diffu, diffv, Kh_h, Kh_q, Ah_h, Ah_q, FrictWork, FrictWork_bh, FrictWork_GME, &
   !$OMP   div_xx_h, sh_xx_h, vort_xy_q, sh_xy_q, GME_coeff_h, GME_coeff_q, &
-  !$OMP   KH_u_GME, KH_v_GME, grid_Re_Kh, grid_Re_Ah, NoSt, ShSt, hu_cont, hv_cont, &
-  !$OMP   true_vorticity &
+  !$OMP   KH_u_GME, KH_v_GME, grid_Re_Kh, grid_Re_Ah, NoSt, ShSt, hu_cont, hv_cont &
   !$OMP ) &
   !$OMP private( &
   !$OMP   i, j, k, n, tmp, &
@@ -959,7 +959,7 @@ subroutine horizontal_viscosity(u, v, h, uh, vh, diffu, diffv, MEKE, VarMix, G, 
           vort_xy(I,J) = (2.0-G%mask2dBu(I,J)) * ( dvdx(I,J) - dudy(I,J) )
         enddo ; enddo
       else
-        if (true_vorticity) then
+        if (CS%use_circulation) then
           do J=js_vort,je_vort ; do I=is_vort,ie_vort
             vort_xy(I,J) = G%mask2dBu(I,J) * G%IareaBu(I,J) * (  &
               (v(i+1,J,k)*G%dyCv(i+1,J) - v(i,J,k)*G%dyCv(i,J))  &
@@ -2368,6 +2368,10 @@ subroutine hor_visc_init(Time, G, GV, US, param_file, diag, CS, ADp)
   CS%diag => diag
   ! Read parameters and write them to the model log.
   call log_version(param_file, mdl, version, "")
+
+  call get_param(param_file, mdl, "USE_CIRCULATION_IN_STRAIN", CS%use_circulation, &
+                 "Use circulation theorem to compute vorticity (for ZB20 or Leith)", &
+                 default=.False.)
 
   ! All parameters are read in all cases to enable parameter spelling checks.
   call get_param(param_file, mdl, "DEFAULT_ANSWER_DATE", default_answer_date, &
