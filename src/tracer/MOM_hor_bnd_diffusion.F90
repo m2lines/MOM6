@@ -143,10 +143,13 @@ logical function hor_bnd_diffusion_init(Time, G, GV, US, param_file, diag, diaba
                  "for vertical remapping for all variables. "//&
                  "It can be one of the following schemes: "//&
                  trim(remappingSchemesDoc), default=remappingDefaultScheme)
+  call get_param(param_file, mdl, "REMAPPING_USE_OM4_SUBCELLS", om4_remap_via_sub_cells, &
+                 do_not_log=.true., default=.true.)
+
   call get_param(param_file, mdl, "HBD_REMAPPING_USE_OM4_SUBCELLS", om4_remap_via_sub_cells, &
                  "If true, use the OM4 remapping-via-subcells algorithm for horizontal boundary diffusion. "//&
                  "See REMAPPING_USE_OM4_SUBCELLS for details. "//&
-                 "We recommend setting this option to false.", default=.true.)
+                 "We recommend setting this option to false.", default=om4_remap_via_sub_cells)
 
   ! GMM, TODO: add HBD params to control optional arguments in initialize_remapping.
   call initialize_remapping( CS%remap_CS, string, boundary_extrapolation=boundary_extrap, &
@@ -154,10 +157,11 @@ logical function hor_bnd_diffusion_init(Time, G, GV, US, param_file, diag, diaba
                              check_reconstruction=.false., check_remapping=.false., &
                              h_neglect=CS%H_subroundoff, h_neglect_edge=CS%H_subroundoff)
   call extract_member_remapping_CS(CS%remap_CS, degree=CS%deg)
-  call get_param(param_file, mdl, "DEBUG", debug, default=.false., do_not_log=.true.)
+  call get_param(param_file, mdl, "DEBUG", debug, &
+                 default=.false., debuggingParam=.true., do_not_log=.true.)
   call get_param(param_file, mdl, "HBD_DEBUG", CS%debug, &
                  "If true, write out verbose debugging data in the HBD module.", &
-                 default=debug)
+                 default=debug, debuggingParam=.true.)
 
   id_clock_hbd = cpu_clock_id('(Ocean HBD)', grain=CLOCK_MODULE)
 
@@ -230,7 +234,7 @@ subroutine hor_bnd_diffusion(G, GV, US, h, Coef_x, Coef_y, dt, Reg, visc, CS)
     tracer => Reg%tr(m)
 
     if (CS%debug) then
-      call hchksum(tracer%t, "before HBD "//tracer%name,G%HI)
+      call hchksum(tracer%t, "before HBD "//tracer%name, G%HI, scale=tracer%conc_scale)
     endif
 
     ! for diagnostics
@@ -286,10 +290,10 @@ subroutine hor_bnd_diffusion(G, GV, US, h, Coef_x, Coef_y, dt, Reg, visc, CS)
     endif
 
     if (CS%debug) then
-      call hchksum(tracer%t, "after HBD "//tracer%name,G%HI)
+      call hchksum(tracer%t, "after HBD "//tracer%name, G%HI, scale=tracer%conc_scale)
       ! tracer (native grid) integrated tracer amounts before and after HBD
-      tracer_int_prev = global_mass_integral(h, G, GV, tracer_old)
-      tracer_int_end = global_mass_integral(h, G, GV, tracer%t)
+      tracer_int_prev = global_mass_integral(h, G, GV, tracer_old, scale=tracer%conc_scale)
+      tracer_int_end = global_mass_integral(h, G, GV, tracer%t, scale=tracer%conc_scale)
       write(mesg,*) 'Total '//tracer%name//' before/after HBD:', tracer_int_prev, tracer_int_end
       call MOM_mesg(mesg)
     endif
@@ -413,7 +417,7 @@ subroutine hbd_grid(boundary, G, GV, hbl, h, CS)
 
 end subroutine hbd_grid
 
-!> Calculate the harmonic mean of two quantities
+!> Calculate the harmonic mean of two quantities [arbitrary]
 !! See \ref section_harmonic_mean.
 real function harmonic_mean(h1,h2)
   real :: h1 !< Scalar quantity [arbitrary]
@@ -443,7 +447,7 @@ integer function  find_minimum(x, s, e)
     if (x(i) < minimum) then !   if x(i) less than the min?
       minimum  = x(i)   !      Yes, a new minimum found
       location = i                !      record its position
-    end if
+    endif
   enddo
   find_minimum = location          ! return the position
 end function  find_minimum
@@ -1238,7 +1242,7 @@ end subroutine hor_bnd_diffusion_end
 !!
 !! \subsection section_harmonic_mean Harmonic Mean
 !!
-!! The harmonic mean (HM) betwen h1 and h2 is defined as:
+!! The harmonic mean (HM) between h1 and h2 is defined as:
 !!
 !! \f[ HM = \frac{2 \times h1 \times h2}{h1 + h2} \f]
 !!
