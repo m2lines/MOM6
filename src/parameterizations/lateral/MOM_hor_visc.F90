@@ -2369,8 +2369,8 @@ subroutine hor_visc_init(Time, G, GV, US, param_file, diag, CS, ADp)
   ! Read parameters and write them to the model log.
   call log_version(param_file, mdl, version, "")
 
-  call get_param(param_file, mdl, "USE_CIRCULATION_IN_STRAIN", CS%use_circulation, &
-                 "Use circulation theorem to compute vorticity (for ZB20 or Leith)", &
+  call get_param(param_file, mdl, "USE_CIRCULATION_IN_HORVISC", CS%use_circulation, &
+                 "Use circulation theorem to compute vorticity in horvisc module (for ZB20 or Leith)", &
                  default=.False.)
 
   ! All parameters are read in all cases to enable parameter spelling checks.
