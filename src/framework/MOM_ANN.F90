@@ -3,13 +3,12 @@ module MOM_ANN
 
 ! This file is part of MOM6. See LICENSE.md for the license
 
-use MOM_diag_mediator, only : diag_ctrl, time_type
-use MOM_io, only : MOM_read_data
+use MOM_io, only : MOM_read_data, field_exists
 use MOM_error_handler, only : MOM_error, FATAL, MOM_mesg
-!
+
 implicit none ; private
 
-#include <MOM_memory.h>
+!#include <MOM_memory.h>
 
 public ANN_init, ANN_apply, ANN_end
 
@@ -41,10 +40,15 @@ type, public :: ANN_CS ; private
                                  !! transformation between layers defined by Matrix A and vias b.
 
   real, allocatable :: &
-    input_norms(:), & !< Array of length layer_sizes(1). By these values
-                      !! each input feature will be divided before feeding into the ANN [arbitrary]
-    output_norms(:)   !< Array of length layer_sizes(num_layers). By these values
-                      !! each output of the ANN will be multiplied [arbitrary]
+    input_means(:), &  !< Array of length layer_sizes(1) containing the mean of each input feature
+                       !! prior to normalization by input_norms [arbitrary].
+    input_norms(:), &  !< Array of length layer_sizes(1) containing the *inverse* of the standard
+                       !! deviation for each input feature used to normalize (multiply) before
+                       !! feeding into the ANN [arbitrary]
+    output_means(:), & !< Array of length layer_sizes(num_layers) containing the mean of each
+                       !! output prior to normalization by output_norms [arbitrary].
+    output_norms(:)    !< Array of length layer_sizes(num_layers) containing the standard deviation
+                       !! each output of the ANN will be multiplied [arbitrary]
 end type ANN_CS
 
 contains
@@ -58,7 +62,7 @@ contains
 subroutine ANN_init(CS, NNfile)
   type(ANN_CS), intent(inout)  :: CS     !< ANN control structure.
   character(*), intent(in)     :: NNfile !< The name of NetCDF file having neural network parameters
-
+  ! Local variables
   integer :: i
   character(len=1) :: layer_num_str
   character(len=3) :: fieldname
@@ -73,11 +77,26 @@ subroutine ANN_init(CS, NNfile)
   call MOM_read_data(NNfile, "layer_sizes", CS%layer_sizes)
 
   ! Read normalization factors
+  allocate(CS%input_means(CS%layer_sizes(1)))
   allocate(CS%input_norms(CS%layer_sizes(1)))
+  allocate(CS%output_means(CS%layer_sizes(CS%num_layers)))
   allocate(CS%output_norms(CS%layer_sizes(CS%num_layers)))
 
-  call MOM_read_data(NNfile, 'input_norms', CS%input_norms)
-  call MOM_read_data(NNfile, 'output_norms', CS%output_norms)
+  CS%input_means(:) = 0. ! In case input_means is not in the file, assume zero mean
+  if (field_exists(NNfile, 'input_means')) &
+    call MOM_read_data(NNfile, 'input_means', CS%input_means)
+  CS%input_norms(:) = 1. ! In case input_norms is not in the file, assume unit variance
+  if (field_exists(NNfile, 'input_norms')) then
+    call MOM_read_data(NNfile, 'input_norms', CS%input_norms)
+    ! We calculate the reciprocal here to avoid repeated divisions later
+    CS%input_norms(:) = 1.  / CS%input_norms(:)
+  endif
+  CS%output_means(:) = 0. ! In case output_means is not in the file, assume zero mean
+  if (field_exists(NNfile, 'output_means')) &
+    call MOM_read_data(NNfile, 'output_means', CS%output_means)
+  CS%output_norms(:) = 1. ! In case output_norms is not in the file, assume unit variance
+  if (field_exists(NNfile, 'output_norms')) &
+    call MOM_read_data(NNfile, 'output_norms', CS%output_norms)
 
   ! Allocate the Linear transformations between layers.
   allocate(CS%layers(CS%num_layers-1))
@@ -103,6 +122,7 @@ subroutine ANN_init(CS, NNfile)
   ! No activation function for the last layer
   CS%layers(CS%num_layers-1)%activation = .False.
 
+  if (field_exists(NNfile, 'x_test') .and. field_exists(NNfile, 'y_test') ) &
   call ANN_test(CS, NNfile)
 
   call MOM_mesg('ANN: have been read from ' // trim(NNfile), 2)
@@ -111,9 +131,9 @@ end subroutine ANN_init
 
 !> Test ANN by comparing the prediction with the test data.
 subroutine ANN_test(CS, NNfile)
-  type(ANN_CS), intent(inout)  :: CS     !< ANN control structure.
-  character(*), intent(in)     :: NNfile !< The name of NetCDF file having neural network parameters
-
+  type(ANN_CS), intent(inout) :: CS     !< ANN control structure.
+  character(*), intent(in)    :: NNfile !< The name of NetCDF file having neural network parameters
+  ! Local variables
   real, dimension(:), allocatable :: x_test, y_test, y_pred ! [arbitrary]
   real :: relative_error ! [arbitrary]
   character(len=200) :: relative_error_str
@@ -130,7 +150,7 @@ subroutine ANN_test(CS, NNfile)
   ! Compute prediction
   call ANN_apply(x_test, y_pred, CS)
 
-  relative_error = maxval(abs(y_pred - y_test)) / maxval(abs(y_test))
+  relative_error = maxval(abs(y_pred(:) - y_test(:))) / maxval(abs(y_test(:)))
 
   if (relative_error > 1e-5) then
     write(relative_error_str, '(ES12.4)') relative_error
@@ -145,7 +165,7 @@ end subroutine ANN_test
 !> Deallocates memory of ANN
 subroutine ANN_end(CS)
   type(ANN_CS), intent(inout) :: CS !< ANN control structure.
-
+  ! Local variables
   integer :: i
 
   deallocate(CS%layer_sizes)
@@ -163,26 +183,25 @@ end subroutine ANN_end
 !> Main ANN function: normalizes input vector x, applies Linear layers, and
 !! un-normalizes the output.
 subroutine ANN_apply(x, y, CS)
-  type(ANN_CS), intent(in) :: CS !< ANN control structure
-
+  type(ANN_CS), intent(in)      :: CS !< ANN control structure
   real, dimension(CS%layer_sizes(1)), &
-                  intent(in)  :: x !< input [arbitrary]
+                  intent(in)    :: x !< input [arbitrary]
   real, dimension(CS%layer_sizes(CS%num_layers)), &
-                  intent(out) :: y !< output [arbitrary]
-
+                  intent(inout) :: y !< output [arbitrary]
+  ! Local variables
   real, allocatable :: x_1(:), x_2(:) ! intermediate states [nondim]
   integer :: i
 
   ! Normalize input
   allocate(x_1(CS%layer_sizes(1)))
   do i = 1,CS%layer_sizes(1)
-      x_1(i) = x(i) / CS%input_norms(i)
+    x_1(i) = ( x(i) - CS%input_means(i) ) * CS%input_norms(i)
   enddo
 
   ! Apply Linear layers
   do i = 1, CS%num_layers-1
     allocate(x_2(CS%layer_sizes(i+1)))
-    call Layer_apply(x_1, x_2, CS%layers(i))
+    call layer_apply(x_1, x_2, CS%layers(i))
     deallocate(x_1)
     allocate(x_1(CS%layer_sizes(i+1)))
     x_1 = x_2
@@ -191,7 +210,7 @@ subroutine ANN_apply(x, y, CS)
 
   ! Un-normalize output
   do i = 1, CS%layer_sizes(CS%num_layers)
-    y(i) = x_1(i) * CS%output_norms(i)
+    y(i) = ( x_1(i) * CS%output_norms(i) ) + CS%output_means(i)
   enddo
 
   deallocate(x_1)
@@ -199,8 +218,8 @@ end subroutine ANN_apply
 
 !> The default activation function
 pure function activation_fn(x) result (y)
-  real, intent(in)  :: x !< Scalar input value [nondim]
-  real :: y !< Scalar output value [nondim]
+  real, intent(in) :: x !< Scalar input value [nondim]
+  real             :: y !< Scalar output value [nondim]
 
   y = max(x, 0.0) ! ReLU activation
 
@@ -208,13 +227,13 @@ end function activation_fn
 
 !> Applies linear layer to input data x and stores the result in y with
 !! y = A*x + b with optional application of the activation function.
-subroutine Layer_apply(x, y, layer)
-  type(layer_type), intent(in)  :: layer !< Linear layer
+subroutine layer_apply(x, y, layer)
+  type(layer_type), intent(in)    :: layer !< Linear layer
   real, dimension(layer%input_width), &
-                    intent(in)  :: x     !< Input vector [nondim]
+                    intent(in)    :: x     !< Input vector [nondim]
   real, dimension(layer%output_width), &
-                    intent(out) :: y     !< Output vector [nondim]
-
+                    intent(inout) :: y     !< Output vector [nondim]
+  ! Local variables
   integer :: i, j
 
   y(:) = 0.
@@ -233,6 +252,6 @@ subroutine Layer_apply(x, y, layer)
       y(j) = activation_fn(y(j))
     endif
   enddo
-end subroutine Layer_apply
+end subroutine layer_apply
 
 end module MOM_ANN
