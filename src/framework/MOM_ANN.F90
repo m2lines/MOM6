@@ -12,7 +12,17 @@ implicit none ; private
 !#include <MOM_memory.h>
 
 public ANN_init, ANN_allocate, ANN_apply, ANN_end, ANN_unit_tests
+public ANN_apply_vector_v1, ANN_apply_vector_v2, ANN_apply_vector_v3
+public ANN_apply_vector_v4
+public ANN_apply_array_v1, ANN_apply_array_v2, ANN_apply_array_v3
 public set_layer, set_input_normalization, set_output_normalization
+public ANN_random, randomize_layer
+
+!> Applies linear layer to input data x and stores the result in y with
+!! y = A*x + b with optional application of the activation function.
+interface ANN_apply
+  module procedure ANN_apply_vector_v1
+end interface ANN_apply
 
 !> Type for a single Linear layer of ANN,
 !! i.e. stores the matrix A and bias b
@@ -26,6 +36,8 @@ type, private :: layer_type; private
   real, allocatable :: A(:,:) !< Matrix in column-major order
                               !! of size A(output_width, input_width) [nondim]
   real, allocatable :: b(:)   !< bias vector of size output_width [nondim]
+  real, allocatable :: Atranspose(:,:) !< Matrix in column-major order
+                                       !! of size A(output_width, input_width) [nondim]
 end type layer_type
 
 !> Control structure/type for ANN
@@ -51,6 +63,8 @@ type, public :: ANN_CS ; private
                        !! output prior to normalization by output_norms [arbitrary].
     output_norms(:)    !< Array of length layer_sizes(num_layers) containing the standard deviation
                        !! each output of the ANN will be multiplied [arbitrary]
+
+  integer, public :: parameters = 0 !< Count of number of parameters
 end type ANN_CS
 
 contains
@@ -107,6 +121,7 @@ subroutine ANN_init(CS, NNfile)
     fieldname = trim('A') // trim(layer_num_str)
     call MOM_read_data(NNfile, fieldname, CS%layers(i)%A, &
                         (/1,1,1,1/),(/CS%layers(i)%output_width,CS%layers(i)%input_width,1,1/))
+    CS%layers(i)%Atranspose(:,:) = transpose( CS%layers(i)%A(:,:) )
 
     ! Reading bias b
     fieldname = trim('b') // trim(layer_num_str)
@@ -151,6 +166,7 @@ subroutine ANN_allocate(CS, num_layers, layer_sizes)
 
   ! Allocate the Linear transformations between layers
   allocate(CS%layers(CS%num_layers-1))
+  CS%parameters = 2 * CS%layer_sizes(1) ! For input normalization
 
   ! Allocate matrix A and bias b for each layer
   do l = 1, CS%num_layers-1
@@ -159,7 +175,14 @@ subroutine ANN_allocate(CS, num_layers, layer_sizes)
 
     allocate( CS%layers(l)%A(CS%layers(l)%output_width, CS%layers(l)%input_width) )
     allocate( CS%layers(l)%b(CS%layers(l)%output_width) )
+    allocate( CS%layers(l)%Atranspose(CS%layers(l)%input_width, CS%layers(l)%output_width) )
+
+    CS%parameters = CS%parameters &
+       + CS%layer_sizes(l) * CS%layer_sizes(l+1) & ! For weights
+       + CS%layer_sizes(l+1) ! For bias
   enddo
+  CS%parameters = CS%parameters &
+     + 2 * CS%layer_sizes(CS%num_layers) ! For output normalization
 
 end subroutine ANN_allocate
 
@@ -182,7 +205,7 @@ subroutine ANN_test(CS, NNfile)
   call MOM_read_data(NNfile, 'y_test', y_test)
 
   ! Compute prediction
-  call ANN_apply(x_test, y_pred, CS)
+  call ANN_apply_vector_v1(x_test, y_pred, CS)
 
   relative_error = maxval(abs(y_pred(:) - y_test(:))) / maxval(abs(y_test(:)))
 
@@ -216,17 +239,23 @@ subroutine ANN_end(CS)
 
 end subroutine ANN_end
 
-!> Main ANN function: normalizes input vector x, applies Linear layers, and
-!! un-normalizes the output.
-subroutine ANN_apply(x, y, CS)
-  type(ANN_CS), intent(in)      :: CS !< ANN control structure
-  real, dimension(CS%layer_sizes(1)), &
-                  intent(in)    :: x !< input [arbitrary]
-  real, dimension(CS%layer_sizes(CS%num_layers)), &
-                  intent(inout) :: y !< output [arbitrary]
+!> The default activation function
+pure elemental function activation_fn(x) result (y)
+  real, intent(in) :: x !< Scalar input value [nondim]
+  real             :: y !< Scalar output value [nondim]
+
+  y = max(x, 0.0) ! ReLU activation
+
+end function activation_fn
+
+!> Single application of ANN inference using vector input and output
+subroutine ANN_apply_vector_v1(x, y, CS)
+  type(ANN_CS), intent(in)    :: CS                               !< ANN instance
+  real,         intent(in)    :: x(CS%layer_sizes(1))             !< Inputs [arbitrary]
+  real,         intent(inout) :: y(CS%layer_sizes(CS%num_layers)) !< Outputs [arbitrary]
   ! Local variables
   real, allocatable :: x_1(:), x_2(:) ! intermediate states [nondim]
-  integer :: i
+  integer :: i, o ! Input, output indices
 
   ! Normalize input
   allocate(x_1(CS%layer_sizes(1)))
@@ -237,58 +266,455 @@ subroutine ANN_apply(x, y, CS)
   ! Apply Linear layers
   do i = 1, CS%num_layers-1
     allocate(x_2(CS%layer_sizes(i+1)))
-    call layer_apply(x_1, x_2, CS%layers(i))
+    call layer_apply_v1(x_1, x_2, CS%layers(i))
     deallocate(x_1)
     allocate(x_1(CS%layer_sizes(i+1)))
-    x_1 = x_2
+    x_1(:) = x_2(:)
     deallocate(x_2)
   enddo
 
   ! Un-normalize output
-  do i = 1, CS%layer_sizes(CS%num_layers)
-    y(i) = ( x_1(i) * CS%output_norms(i) ) + CS%output_means(i)
+  do o = 1, CS%layer_sizes(CS%num_layers)
+    y(o) = ( x_1(o) * CS%output_norms(o) ) + CS%output_means(o)
   enddo
 
   deallocate(x_1)
-end subroutine ANN_apply
 
-!> The default activation function
-pure function activation_fn(x) result (y)
-  real, intent(in) :: x !< Scalar input value [nondim]
-  real             :: y !< Scalar output value [nondim]
+  contains
 
-  y = max(x, 0.0) ! ReLU activation
+  !> Applies linear layer to input data x and stores the result in y with
+  !! y = A*x + b with optional application of the activation function so the
+  !! overall operations is ReLU(A*x + b)
+  subroutine layer_apply_v1(x, y, layer)
+    type(layer_type), intent(in)    :: layer                 !< Linear layer
+    real,             intent(in)    :: x(layer%input_width)  !< Input vector [nondim]
+    real,             intent(inout) :: y(layer%output_width) !< Output vector [nondim]
+    ! Local variables
+    integer :: i, o ! Input, output indices
 
-end function activation_fn
+    ! Add bias
+    y(:) = layer%b(:)
+    ! Multiply by kernel
+    do i=1,layer%input_width
+      do o=1,layer%output_width
+        y(o) = y(o) + x(i) * layer%A(o, i)
+      enddo
+    enddo
+    ! Apply activation function
+    if (layer%activation) y(:) = activation_fn(y(:))
 
-!> Applies linear layer to input data x and stores the result in y with
-!! y = A*x + b with optional application of the activation function.
-subroutine layer_apply(x, y, layer)
-  type(layer_type), intent(in)    :: layer !< Linear layer
-  real, dimension(layer%input_width), &
-                    intent(in)    :: x     !< Input vector [nondim]
-  real, dimension(layer%output_width), &
-                    intent(inout) :: y     !< Output vector [nondim]
+  end subroutine layer_apply_v1
+end subroutine ANN_apply_vector_v1
+
+!> Single application of ANN inference using vector input and output
+subroutine ANN_apply_vector_v2(x, y, CS)
+  type(ANN_CS), intent(in)    :: CS                               !< ANN instance
+  real,         intent(in)    :: x(CS%layer_sizes(1))             !< Inputs [arbitrary]
+  real,         intent(inout) :: y(CS%layer_sizes(CS%num_layers)) !< Outputs [arbitrary]
   ! Local variables
-  integer :: i, j
+  real, allocatable :: x_1(:), x_2(:) ! intermediate states [nondim]
+  integer :: i, o ! Input, output indices
 
-  y(:) = 0.
-  do i=1,layer%input_width
-    do j=1,layer%output_width
+  allocate( x_1( maxval( CS%layer_sizes(:) ) ) )
+  allocate( x_2( maxval( CS%layer_sizes(:) ) ) )
+
+  ! Normalize input
+  do i = 1,CS%layer_sizes(1)
+    x_1(i) = ( x(i) - CS%input_means(i) ) * CS%input_norms(i)
+  enddo
+
+  ! Apply Linear layers
+  do i = 1, CS%num_layers-2, 2
+    call layer_apply_v2(x_1, x_2, CS%layers(i))
+    call layer_apply_v2(x_2, x_1, CS%layers(i+1))
+  enddo
+  if (mod(CS%num_layers,2)==0) then
+    call layer_apply_v2(x_1, x_2, CS%layers(CS%num_layers-1))
+    ! Un-normalize output
+    do o = 1, CS%layer_sizes(CS%num_layers)
+      y(o) = x_2(o) * CS%output_norms(o) + CS%output_means(o)
+    enddo
+  else
+    ! Un-normalize output
+    do o = 1, CS%layer_sizes(CS%num_layers)
+      y(o) = x_1(o) * CS%output_norms(o) + CS%output_means(o)
+    enddo
+  endif
+
+  deallocate(x_1, x_2)
+
+  contains
+
+  !> Applies linear layer to input data x and stores the result in y with
+  !! y = A*x + b with optional application of the activation function so the
+  !! overall operations is ReLU(A*x + b)
+  subroutine layer_apply_v2(x, y, layer)
+    type(layer_type), intent(in)    :: layer                 !< Linear layer
+    real,             intent(in)    :: x(layer%input_width)  !< Input vector [nondim]
+    real,             intent(inout) :: y(layer%output_width) !< Output vector [nondim]
+    ! Local variables
+    integer :: i, o ! Input, output indices
+
+    ! Add bias
+    y(:) = layer%b(:)
+    ! Multiply by kernel
+    do i=1,layer%input_width
+      do o=1,layer%output_width
+        y(o) = y(o) + x(i) * layer%A(o, i)
+      enddo
+    enddo
+    ! Apply activation function
+    if (layer%activation) y(:) = activation_fn(y(:))
+
+  end subroutine layer_apply_v2
+end subroutine ANN_apply_vector_v2
+
+!> Single application of ANN inference using vector input and output
+subroutine ANN_apply_vector_v3(x, y, CS)
+  type(ANN_CS), intent(in)    :: CS                               !< ANN instance
+  real,         intent(in)    :: x(CS%layer_sizes(1))             !< Inputs [arbitrary]
+  real,         intent(inout) :: y(CS%layer_sizes(CS%num_layers)) !< Outputs [arbitrary]
+  ! Local variables
+  real, allocatable :: x_1(:), x_2(:) ! intermediate states [nondim]
+  integer :: i, o ! Input, output indices
+
+  allocate( x_1( maxval( CS%layer_sizes(:) ) ) )
+  allocate( x_2( maxval( CS%layer_sizes(:) ) ) )
+
+  ! Normalize input
+  do i = 1,CS%layer_sizes(1)
+    x_1(i) = ( x(i) - CS%input_means(i) ) * CS%input_norms(i)
+  enddo
+
+  ! Apply Linear layers
+  do i = 1, CS%num_layers-2, 2
+    call layer_apply_v3(x_1, x_2, CS%layers(i))
+    call layer_apply_v3(x_2, x_1, CS%layers(i+1))
+  enddo
+  if (mod(CS%num_layers,2)==0) then
+    call layer_apply_v3(x_1, x_2, CS%layers(CS%num_layers-1))
+    ! Un-normalize output
+    do o = 1, CS%layer_sizes(CS%num_layers)
+      y(o) = x_2(o) * CS%output_norms(o) + CS%output_means(o)
+    enddo
+  else
+    ! Un-normalize output
+    do o = 1, CS%layer_sizes(CS%num_layers)
+      y(o) = x_1(o) * CS%output_norms(o) + CS%output_means(o)
+    enddo
+  endif
+
+  deallocate(x_1, x_2)
+
+  contains
+
+  !> Applies linear layer to input data x and stores the result in y with
+  !! y = A*x + b with optional application of the activation function so the
+  !! overall operations is ReLU(A*x + b)
+  subroutine layer_apply_v3(x, y, layer)
+    type(layer_type), intent(in)    :: layer                 !< Linear layer
+    real,             intent(in)    :: x(layer%input_width)  !< Input vector [nondim]
+    real,             intent(inout) :: y(layer%output_width) !< Output vector [nondim]
+    ! Local variables
+    integer :: i, o ! Input, output indices
+
+    ! Add bias
+    y(:) = layer%b(:)
+    ! Multiply by kernel
+    do o=1,layer%output_width
+      do i=1,layer%input_width
+        y(o) = y(o) + x(i) * layer%A(o, i)
+      enddo
+    enddo
+    ! Apply activation function
+    if (layer%activation) y(:) = activation_fn(y(:))
+
+  end subroutine layer_apply_v3
+end subroutine ANN_apply_vector_v3
+
+!> Single application of ANN inference using vector input and output
+subroutine ANN_apply_vector_v4(x, y, CS)
+  type(ANN_CS), intent(in)    :: CS                               !< ANN instance
+  real,         intent(in)    :: x(CS%layer_sizes(1))             !< Inputs [arbitrary]
+  real,         intent(inout) :: y(CS%layer_sizes(CS%num_layers)) !< Outputs [arbitrary]
+  ! Local variables
+  real, allocatable :: x_1(:), x_2(:) ! intermediate states [nondim]
+  integer :: l, i, o ! Layer, input, output indices
+
+  allocate( x_1( maxval( CS%layer_sizes(:) ) ) )
+  allocate( x_2( maxval( CS%layer_sizes(:) ) ) )
+
+  ! Normalize input
+  do i = 1,CS%layer_sizes(1)
+    x_1(i) = ( x(i) - CS%input_means(i) ) * CS%input_norms(i)
+  enddo
+
+  ! Apply Linear layers
+  do l = 1, CS%num_layers-2, 2
+    call layer_apply_v4(x_1, x_2, CS%layers(l))
+    call layer_apply_v4(x_2, x_1, CS%layers(l+1))
+  enddo
+  if (mod(CS%num_layers,2)==0) then
+    call layer_apply_v4(x_1, x_2, CS%layers(CS%num_layers-1))
+    ! Un-normalize output
+    do o = 1, CS%layer_sizes(CS%num_layers)
+      y(o) = x_2(o) * CS%output_norms(o) + CS%output_means(o)
+    enddo
+  else
+    ! Un-normalize output
+    do o = 1, CS%layer_sizes(CS%num_layers)
+      y(o) = x_1(o) * CS%output_norms(o) + CS%output_means(o)
+    enddo
+  endif
+
+  deallocate(x_1, x_2)
+
+  contains
+
+  !> Applies linear layer to input data x and returns the result in y with
+  !! y = A*x + b with optional application of the activation function so the
+  !! overall operations is ReLU(A*x + b)
+  subroutine layer_apply_v4(x, y, layer)
+    type(layer_type), intent(in)    :: layer                 !< Linear layer
+    real,             intent(in)    :: x(layer%input_width)  !< Input vector [nondim]
+    real,             intent(inout) :: y(layer%output_width) !< Output vector [nondim]
+    ! Local variables
+    integer :: i ! Input loop index
+
+    ! Add bias
+    y(:) = layer%b(:)
+    ! Multiply by kernel
+    do i=1,layer%input_width
+      do o=1,layer%output_width
+        y(o) = y(o) + x(i) * layer%Atranspose(i, o)
+      enddo
+    enddo
+    ! Apply activation function
+    if (layer%activation) y(:) = activation_fn(y(:))
+
+  end subroutine layer_apply_v4
+end subroutine ANN_apply_vector_v4
+
+!> Single application of ANN inference using array input and output
+!! with (space,feature) indexing
+subroutine ANN_apply_array_v1(nij, x, y, CS)
+  type(ANN_CS), intent(in)    :: CS !< ANN control structure
+  integer,      intent(in)    :: nij !< Size of spatial dimension
+  real,         intent(in)    :: x(nij, CS%layer_sizes(1)) !< input [arbitrary]
+  real,         intent(inout) :: y(nij, CS%layer_sizes(CS%num_layers)) !< output [arbitrary]
+  ! Local variables
+  real, allocatable :: x_1(:,:), x_2(:,:) ! intermediate states [nondim]
+  integer :: l, i, o ! Layer, input, output index
+
+  allocate( x_1( nij, maxval( CS%layer_sizes(:) ) ) )
+  allocate( x_2( nij, maxval( CS%layer_sizes(:) ) ) )
+
+  ! Normalize input
+  do i = 1, CS%layer_sizes(1)
+    x_1(:,i) = ( x(:,i) - CS%input_means(i) ) * CS%input_norms(i)
+  enddo
+
+  ! Apply Linear layers
+  do l = 1, CS%num_layers-2, 2
+    call layer_apply_v1(nij, x_1, x_2, CS%layers(l))
+    call layer_apply_v1(nij, x_2, x_1, CS%layers(l+1))
+  enddo
+  if (mod(CS%num_layers,2)==0) then
+    call layer_apply_v1(nij, x_1, x_2, CS%layers(CS%num_layers-1))
+    ! Un-normalize output
+    do o = 1, CS%layer_sizes(CS%num_layers)
+      y(:,o) = x_2(:,o) * CS%output_norms(o) + CS%output_means(o)
+    enddo
+  else
+    ! Un-normalize output
+    do o = 1, CS%layer_sizes(CS%num_layers)
+      y(:,o) = x_1(:,o) * CS%output_norms(o) + CS%output_means(o)
+    enddo
+  endif
+
+  deallocate(x_1, x_2)
+
+  contains
+
+  !> Applies linear layer to input data x and stores the result in y with
+  !! y = A*x + b with optional application of the activation function so the
+  !! overall operations is ReLU(A*x + b)
+  subroutine layer_apply_v1(nij, x, y, layer)
+    type(layer_type), intent(in)    :: layer !< Linear layer
+    integer,          intent(in)    :: nij   !< Size of spatial dimension
+    real,             intent(in)    :: x(nij, layer%input_width) !< Input vector [nondim]
+    real,             intent(inout) :: y(nij, layer%output_width) !< Output vector [nondim]
+    ! Local variables
+    integer :: i, o ! Input, output indices
+
+    ! Add bias
+    do o = 1, layer%output_width
+      y(:,o) = layer%b(o)
+    enddo
+    ! Multiply by kernel
+    do i = 1, layer%input_width
+      do o = 1, layer%output_width
+        y(:,o) = y(:,o) + x(:,i) * layer%A(o, i)
+      enddo
+    enddo
+    ! Apply activation function
+    if (layer%activation) y(:,:) = activation_fn(y(:,:))
+
+  end subroutine layer_apply_v1
+end subroutine ANN_apply_array_v1
+
+!> Single application of ANN inference using array input and output
+!! with (space,feature) indexing
+subroutine ANN_apply_array_v2(nij, x, y, CS)
+  type(ANN_CS), intent(in)    :: CS !< ANN control structure
+  integer,      intent(in)    :: nij !< Size of spatial dimension
+  real,         intent(in)    :: x(nij, CS%layer_sizes(1)) !< input [arbitrary]
+  real,         intent(inout) :: y(nij, CS%layer_sizes(CS%num_layers)) !< output [arbitrary]
+  ! Local variables
+  real, allocatable :: x_1(:,:), x_2(:,:) ! intermediate states [nondim]
+  integer :: l, i, o ! Layer, input, output index
+
+  allocate( x_1( nij, maxval( CS%layer_sizes(:) ) ) )
+  allocate( x_2( nij, maxval( CS%layer_sizes(:) ) ) )
+
+  ! Normalize input
+  do i = 1, CS%layer_sizes(1)
+    x_1(:,i) = ( x(:,i) - CS%input_means(i) ) * CS%input_norms(i)
+  enddo
+
+  ! Apply Linear layers
+  do l = 1, CS%num_layers-2, 2
+    call layer_apply_v2(nij, x_1, x_2, CS%layers(l))
+    call layer_apply_v2(nij, x_2, x_1, CS%layers(l+1))
+  enddo
+  if (mod(CS%num_layers,2)==0) then
+    call layer_apply_v2(nij, x_1, x_2, CS%layers(CS%num_layers-1))
+    ! Un-normalize output
+    do o = 1, CS%layer_sizes(CS%num_layers)
+      y(:,o) = x_2(:,o) * CS%output_norms(o) + CS%output_means(o)
+    enddo
+  else
+    ! Un-normalize output
+    do o = 1, CS%layer_sizes(CS%num_layers)
+      y(:,o) = x_1(:,o) * CS%output_norms(o) + CS%output_means(o)
+    enddo
+  endif
+
+  deallocate(x_1, x_2)
+
+  contains
+
+  !> Applies linear layer to input data x and stores the result in y with
+  !! y = A*x + b with optional application of the activation function so the
+  !! overall operations is ReLU(A*x + b)
+  subroutine layer_apply_v2(nij, x, y, layer)
+    type(layer_type), intent(in)    :: layer !< Linear layer
+    integer,          intent(in)    :: nij   !< Size of spatial dimension
+    real,             intent(in)    :: x(nij, layer%input_width) !< Input vector [nondim]
+    real,             intent(inout) :: y(nij, layer%output_width) !< Output vector [nondim]
+    ! Local variables
+    integer :: i, o ! Input, output indices
+
+    do o = 1, layer%output_width
+      ! Add bias
+      y(:,o) = layer%b(o)
       ! Multiply by kernel
-      y(j) = y(j) + ( x(i) * layer%A(j, i) )
+      do i = 1, layer%input_width
+        y(:,o) = y(:,o) + x(:,i) * layer%A(o, i)
+      enddo
+      ! Apply activation function
+      if (layer%activation) y(:,o) = activation_fn(y(:,o))
+    enddo
+
+  end subroutine layer_apply_v2
+end subroutine ANN_apply_array_v2
+
+!> Single application of ANN inference using array input and output
+!! with (feature,space) indexing
+subroutine ANN_apply_array_v3(nij, x, y, CS)
+  type(ANN_CS), intent(in)    :: CS !< ANN control structure
+  integer,      intent(in)    :: nij !< Size of spatial dimension
+  real,         intent(in)    :: x(CS%layer_sizes(1), nij) !< input [arbitrary]
+  real,         intent(inout) :: y(CS%layer_sizes(CS%num_layers), nij) !< output [arbitrary]
+  ! Local variables
+  real, allocatable :: x_1(:,:), x_2(:,:) ! intermediate states [nondim]
+  integer :: l, i, o, s ! Layer, input, output, space index
+  integer :: bufw ! Width of work space
+
+  bufw = maxval( CS%layer_sizes(:) )
+  allocate( x_1( bufw, nij ) )
+  allocate( x_2( bufw, nij ) )
+
+  ! Normalize input
+  do s = 1, nij
+    do i = 1,CS%layer_sizes(1)
+      x_1(i,s) = ( x(i,s) - CS%input_means(i) ) * CS%input_norms(i)
     enddo
   enddo
 
-  do j=1,layer%output_width
+  ! Apply Linear layers
+  do l = 1, CS%num_layers-2, 2
+    call layer_apply_v3(nij, bufw, x_1, x_2, CS%layers(l))
+    call layer_apply_v3(nij, bufw, x_2, x_1, CS%layers(l+1))
+  enddo
+  if (mod(CS%num_layers,2)==0) then
+    call layer_apply_v3(nij, bufw, x_1, x_2, CS%layers(CS%num_layers-1))
+    ! Un-normalize output
+    do s = 1, nij
+      do o = 1, CS%layer_sizes(CS%num_layers)
+        y(o,s) = x_2(o,s) * CS%output_norms(o) + CS%output_means(o)
+      enddo
+    enddo
+  else
+    ! Un-normalize output
+    do s = 1, nij
+      do o = 1, CS%layer_sizes(CS%num_layers)
+        y(o,s) = x_1(o,s) * CS%output_norms(o) + CS%output_means(o)
+      enddo
+    enddo
+  endif
+
+  deallocate(x_1, x_2)
+
+  contains
+
+  !> Applies linear layer to input data x and stores the result in y with
+  !! y = A*x + b with optional application of the activation function so the
+  !! overall operations is ReLU(A*x + b)
+  subroutine layer_apply_v3(nij, bufw, x, y, layer)
+    type(layer_type), intent(in)    :: layer !< Linear layer
+    integer,          intent(in)    :: nij   !< Size of spatial dimension
+    integer,          intent(in)    :: bufw  !< Width of work space
+    real,             intent(in)    :: x(bufw, nij) !< Input vector [nondim]
+    real,             intent(inout) :: y(bufw, nij) !< Output vector [nondim]
+    ! Local variables
+    integer :: i, o, s ! Input, output, space indices
+
     ! Add bias
-    y(j) = y(j) + layer%b(j)
+    do s = 1, nij
+      do o = 1, layer%output_width
+        y(o,s) = layer%b(o)
+      enddo
+    enddo
+    ! Multiply by kernel
+    do s = 1, nij
+      do i = 1, layer%input_width
+        do o = 1, layer%output_width
+          y(o,s) = y(o,s) + x(i,s) * layer%A(o, i)
+        enddo
+      enddo
+    enddo
     ! Apply activation function
     if (layer%activation) then
-      y(j) = activation_fn(y(j))
+      do s = 1, nij
+        do o = 1, layer%output_width
+          y(o,s) = activation_fn(y(o,s))
+        enddo
+      enddo
     endif
-  enddo
-end subroutine layer_apply
+
+  end subroutine layer_apply_v3
+end subroutine ANN_apply_array_v3
 
 !> Sets weights and bias for a single layer
 subroutine set_layer(ANN, layer, weights, biases, activation)
@@ -312,6 +738,7 @@ subroutine set_layer(ANN, layer, weights, biases, activation)
   if ( size(weights,2) /= size(ANN%layers(layer)%A,2) ) &
       call MOM_error(FATAL, "MOM_ANN, set_layer: mismatch in size of weights (second dim)")
   ANN%layers(layer)%A(:,:) = weights(:,:)
+  ANN%layers(layer)%Atranspose(:,:) = transpose( weights(:,:) )
 
   ANN%layers(layer)%activation = activation
 end subroutine set_layer
@@ -356,6 +783,42 @@ subroutine set_output_normalization(ANN, means, norms)
 
 end subroutine set_output_normalization
 
+!> Create a random ANN
+subroutine ANN_random(ANN, nlayers, widths)
+  type(ANN_CS), intent(inout) :: ANN !< ANN control structure
+  integer,      intent(in)    :: nlayers !< Number of layers
+  integer,      intent(in)    :: widths(nlayers) !< Width of each layer
+  ! Local variables
+  integer :: l
+
+  call ANN_allocate(ANN, nlayers, widths)
+
+  do l = 1, nlayers-1
+    call randomize_layer(ANN, nlayers, l, widths)
+  enddo
+
+end subroutine ANN_random
+
+!> Fill a layer with random numbers
+subroutine randomize_layer(ANN, nlayers, layer, widths)
+  type(ANN_CS), intent(inout) :: ANN !< ANN control structure
+  integer,      intent(in)    :: nlayers !< Number of layers
+  integer,      intent(in)    :: layer !< Layer number to randomize
+  integer,      intent(in)    :: widths(nlayers) !< Width of each layer
+  ! Local variables
+  real :: weights(widths(layer+1),widths(layer)) ! Weights
+  real :: biases(widths(layer+1)) ! Biases
+
+  call random_number(weights)
+  weights(:,:) = 2. * weights(:,:) - 1.
+
+  call random_number(biases)
+  biases(:) = 2. * biases(:) - 1.
+
+  call set_layer(ANN, layer, weights, biases, layer<nlayers-1)
+
+end subroutine randomize_layer
+
 !> Runs unit tests on ANN functions.
 !!
 !! Should only be called from a single/root thread.
@@ -365,7 +828,12 @@ logical function ANN_unit_tests(verbose)
   ! Local variables
   type(ANN_CS) :: ANN ! An ANN
   type(testing) :: test ! Manage tests
-  real, allocatable :: y(:) ! Outputs [arbitrary]
+  real, allocatable :: x(:), y(:), y_good(:), x2(:,:), y2(:,:) ! Inputs, outputs [arbitrary]
+  integer, parameter :: max_rand_nlay = 10 ! Deepest random ANN to generate
+  integer :: widths(max_rand_nlay) ! Number of layers for random ANN
+  integer :: nlay ! Number of layers for random ANN
+  integer :: i, iter ! Loop counters
+  logical :: rand_res ! Status of random tests
 
   ANN_unit_tests = .false. ! Start by assuming all is well
   call test%set(verbose=verbose) ! Pass verbose mode to test
@@ -389,8 +857,8 @@ logical function ANN_unit_tests(verbose)
   call ANN_end(ANN)
 
   ! Identity ANN for vector input/output
-  allocate( y(3) )
   call ANN_allocate(ANN, 2, [3,3])
+  allocate( y(3) )
   call set_layer(ANN, 1, reshape([1.,0.,0., &
                                   0.,1.,0., &
                                   0.,0.,1.], [3,3]), [0.,0.,0.], .false.)
@@ -424,7 +892,7 @@ logical function ANN_unit_tests(verbose)
                                   0.,0.,1.,0., &
                                   0.,0.,0.,1.], [4,4]), [0.,0.,0.,0.], .true.)
   call set_layer(ANN, 2, reshape([1.,1.,1.,1.], [1,4]), [0.], .false.)
-  call ANN_apply([-1.,0.,1.,2.], y, ANN)
+  call ANN_apply_vector_v1([-1.,0.,1.,2.], y, ANN)
   call test%real_scalar(y(1), 3., 'Rectifier+summation')
 
   ! as above but with biases
@@ -439,7 +907,7 @@ logical function ANN_unit_tests(verbose)
                                   0.,0.,1.,0., &
                                   0.,0.,0.,1.], [4,4]), [1.,1.,1.,1.], .true.)
   call set_layer(ANN, 2, reshape([1.,1.,1.,1.], [1,4]), [3.], .false.)
-  call ANN_apply([-2.,-1.,0.,1.], y, ANN)
+  call ANN_apply_vector_v1([-2.,-1.,0.,1.], y, ANN)
   call test%real_scalar(y(1), 6., 'Rectifier+summation+bias')
 
   ! as above but with normalization of inputs and outputs
@@ -449,11 +917,98 @@ logical function ANN_unit_tests(verbose)
   ! De-normalized output: 2 (using mean=-10, norm=2)
   call set_input_normalization(ANN, means=[4.,4.,4.,4.], norms=[0.5,0.5,0.5,0.5])
   call set_output_normalization(ANN, norms=[2.], means=[-10.])
-  call ANN_apply([0.,2.,4.,6.], y, ANN)
+  call ANN_apply_vector_v1([0.,2.,4.,6.], y, ANN)
   call test%real_scalar(y(1), 2., 'Rectifier+summation+bias+norms')
 
   deallocate( y )
   call ANN_end(ANN)
+
+  ! as above with a 1x1 4th identity layer (to check loop combinations)
+  allocate( y(1) )
+  call ANN_allocate(ANN, 4, [4,4,1,1])
+  call set_layer(ANN, 1, reshape([1.,0.,0.,0., &
+                                  0.,1.,0.,0., &
+                                  0.,0.,1.,0., &
+                                  0.,0.,0.,1.], [4,4]), [1.,1.,1.,1.], .true.)
+  call set_layer(ANN, 2, reshape([1.,1.,1.,1.], [1,4]), [3.], .false.)
+  call set_layer(ANN, 3, reshape([1.],[1,1]), [0.], .false.)
+  call set_input_normalization(ANN, means=[4.,4.,4.,4.], norms=[0.5,0.5,0.5,0.5])
+  call set_output_normalization(ANN, norms=[2.], means=[-10.])
+  call ANN_apply_vector_v1([0.,2.,4.,6.], y, ANN)
+  call test%real_scalar(y(1), 2., 'Rectifier+summation+bias+norms 4-layer')
+
+  ! as above with v2 of ANN_apply
+  call ANN_apply_vector_v2([0.,2.,4.,6.], y, ANN)
+  call test%real_scalar(y(1), 2., 'Rectifier+summation+bias+norms 4-layer v2')
+
+  ! as above with v3 of ANN_apply
+  call ANN_apply_vector_v3([0.,2.,4.,6.], y, ANN)
+  call test%real_scalar(y(1), 2., 'Rectifier+summation+bias+norms 4-layer v3')
+
+  ! as above with v4 of ANN_apply
+  call ANN_apply_vector_v4([0.,2.,4.,6.], y, ANN)
+  call test%real_scalar(y(1), 2., 'Rectifier+summation+bias+norms 4-layer v4')
+  deallocate( y )
+
+  ! as above with v4 of ANN_apply applied to 2d inputs, x(space,feature)
+  allocate( y2(1,2) )
+  call ANN_apply_array_v1(2, reshape([0.,1.,2.,3.,4.,5.,6.,7.],[2,4]), y2, ANN)
+  call test%real_arr(2, y2, [2.,5.], 'Rectifier+summation+bias+norms 4-layer array v1')
+
+  ! as above with v5 of ANN_apply applied to 2d inputs, x(space,feature)
+  call ANN_apply_array_v2(2, reshape([0.,1.,2.,3.,4.,5.,6.,7.],[2,4]), y2, ANN)
+  call test%real_arr(2, y2, [2.,5.], 'Rectifier+summation+bias+norms 4-layer array v2')
+  deallocate( y2 )
+
+  ! as above with v6 of ANN_apply applied to 2d inputs, x(feature,space)
+  allocate( y2(2,1) )
+  call ANN_apply_array_v3(2, reshape([0.,2.,4.,6.,1.,3.,5.,7.],[4,2]), y2, ANN)
+  call test%real_arr(2, y2, [2.,5.], 'Rectifier+summation+bias+norms 4-layer array v3')
+  deallocate( y2 )
+
+  call ANN_end(ANN)
+
+  ! The following block checks that for random ANN (weights and layers widths)
+  ! each of the various implementations of inference give identical results.
+  ! This helped catch loop and allocation errors.
+  rand_res = .false.
+  do iter = 1, 1000
+    allocate( y(max_rand_nlay+1) )
+    call random_number(y) ! Vector of random numbers 0..1
+    nlay = 2 + floor( y(max_rand_nlay+1) * ( max_rand_nlay - 1 ) ) ! 2 < nlay < max_rand_nlay
+    widths(:) = 1 + floor( y(1:nlay) * 8 ) ! 1 < layer width < 8
+    deallocate( y )
+    call ANN_random(ANN, nlay, widths)
+    allocate( x(widths(1)), y(widths(nlay)), y_good(widths(nlay)) )
+    call ANN_apply_vector_v1(x, y_good, ANN)
+    call ANN_apply_vector_v2(x, y, ANN)
+    rand_res = rand_res .or. maxval( abs( y(:) - y_good(:) ) ) > 0. ! Check results from v2 = v1
+    call ANN_apply_vector_v3(x, y, ANN)
+    rand_res = rand_res .or. maxval( abs( y(:) - y_good(:) ) ) > 0. ! Check results from v3 = v1
+    call ANN_apply_vector_v4(x, y, ANN)
+    rand_res = rand_res .or. maxval( abs( y(:) - y_good(:) ) ) > 0. ! Check results from v4 = v1
+    allocate( x2(20,widths(1)), y2(20,widths(nlay)) ) ! 2D input, output
+    do i = 1, 20
+      x2(i,:) = x(:)
+    enddo
+    call ANN_apply_array_v1(20, x2, y2, ANN)
+    rand_res = rand_res .or. maxval( abs( maxval(y2(:,:),1) - y_good(:) ) ) > 0. ! Check results from array v1 = v1
+    rand_res = rand_res .or. maxval( abs( minval(y2(:,:),1) - y_good(:) ) ) > 0. ! Check results from array v1 = v1
+    call ANN_apply_array_v2(20, x2, y2, ANN)
+    rand_res = rand_res .or. maxval( abs( maxval(y2(:,:),1) - y_good(:) ) ) > 0. ! Check results from array v2 = v1
+    rand_res = rand_res .or. maxval( abs( minval(y2(:,:),1) - y_good(:) ) ) > 0. ! Check results from array v2 = v1
+    deallocate( x2, y2 )
+    allocate( x2(widths(1),20), y2(widths(nlay),20) ) ! swap to feature, space indexing
+    do i = 1, 20
+      x2(1:widths(1),i) = x(:)
+    enddo
+    call ANN_apply_array_v3(20, x2, y2, ANN)
+    rand_res = rand_res .or. maxval( abs( maxval(y2(:,:),2) - y_good(:) ) ) > 0. ! Check results from array v3 = v1
+    rand_res = rand_res .or. maxval( abs( minval(y2(:,:),2) - y_good(:) ) ) > 0. ! Check results from array v3 = v1
+    deallocate( x, y, y_good, x2, y2 )
+    call ANN_end(ANN)
+  enddo
+  call test%test(rand_res, 'Equivalence between inference variants with random results')
 
   ANN_unit_tests = test%summarize('ANN_unit_tests')
 
