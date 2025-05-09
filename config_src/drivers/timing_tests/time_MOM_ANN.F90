@@ -4,9 +4,9 @@ program time_MOM_ANN
 
 use MOM_ANN, only : ANN_CS
 use MOM_ANN, only : ANN_allocate, ANN_apply, ANN_end
-use MOM_ANN, only : ANN_apply_vector_v1, ANN_apply_vector_v2, ANN_apply_vector_v3
-use MOM_ANN, only : ANN_apply_vector_v4
-use MOM_ANN, only : ANN_apply_array_v1, ANN_apply_array_v2, ANN_apply_array_v3
+use MOM_ANN, only : ANN_apply_vector_orig, ANN_apply_vector_oi, ANN_apply_vector_io
+use MOM_ANN, only : ANN_apply_vector_oit
+use MOM_ANN, only : ANN_apply_array_soi, ANN_apply_array_sio, ANN_apply_array_ois
 use MOM_ANN, only : ANN_random
 
 implicit none
@@ -57,9 +57,9 @@ endif
 ! Fastest variants on Intel Xeon W-2223 CPU @ 3.60GHz (gfortran-13.2 -O3)
 !                   | vector(nxy=1)  |   nxy = 10   |   nxy = 100
 ! ----------------------------------------------------------------------------
-! Small ANN         |   vector_v2    |   array_v1   |   array_v2
-! Shallow-wide ANN  |   vector_v2    |   array_v3   |   array_v2
-! Deep ANN          |   vector_v2    |   array_v3   |   array_v2
+! Small ANN         |   vector_oi    |   array_soi  |   array_sio
+! Shallow-wide ANN  |   vector_oi    |   array_ois  |   array_sio
+! Deep ANN          |   vector_oi    |   array_ois  |   array_sio
 
 write(*,'(a)') "{"
 
@@ -67,25 +67,25 @@ call time_ANN(nlayers, nin, layer_width, nout, nsamp, nits, nxy, &
               0, "MOM_ANN:ANN_apply(vector)")
 write(*,"(',')")
 call time_ANN(nlayers, nin, layer_width, nout, nsamp, nits, nxy, &
-              1, "MOM_ANN:ANN_apply_vector_v1(array)")
+              1, "MOM_ANN:ANN_apply_vector_orig(array)")
 write(*,"(',')")
 call time_ANN(nlayers, nin, layer_width, nout, nsamp, nits, nxy, &
-              2, "MOM_ANN:ANN_apply_vector_v2(array)")
+              2, "MOM_ANN:ANN_apply_vector_oi(array)")
 write(*,"(',')")
 call time_ANN(nlayers, nin, layer_width, nout, nsamp, nits, nxy, &
-              3, "MOM_ANN:ANN_apply_vector_v3(array)")
+              3, "MOM_ANN:ANN_apply_vector_io(array)")
 write(*,"(',')")
 call time_ANN(nlayers, nin, layer_width, nout, nsamp, nits, nxy, &
-              4, "MOM_ANN:ANN_apply_vector_v4(array)")
+              4, "MOM_ANN:ANN_apply_vector_oit(array)")
 write(*,"(',')")
 call time_ANN(nlayers, nin, layer_width, nout, nsamp, nits, nxy, &
-              11, "MOM_ANN:ANN_apply_array_v1(array)")
+              11, "MOM_ANN:ANN_apply_array_soi(array)")
 write(*,"(',')")
 call time_ANN(nlayers, nin, layer_width, nout, nsamp, nits, nxy, &
-              12, "MOM_ANN:ANN_apply_array_v2(array)")
+              12, "MOM_ANN:ANN_apply_array_sio(array)")
 write(*,"(',')")
 call time_ANN(nlayers, nin, layer_width, nout, nsamp, nits, nxy, &
-              13, "MOM_ANN:ANN_apply_array_v3(array)")
+              13, "MOM_ANN:ANN_apply_array_ois(array)")
 write(*,"()")
 
 write(*,'(a)') "}"
@@ -123,7 +123,7 @@ subroutine time_ANN(nlayers, nin, width, nout, nsamp, nits, nxy, impl, label)
   real :: tmin, tmax, tmean, tstd ! Min, max, mean, and standard deviation, of CPU times [s]
   integer :: asamp ! Actual samples of timings
   integer :: aits ! Actual iterations
-  real :: flops ! Operations per sec estimated from parameters [# s-1]
+  real :: words_per_sec ! Operations per sec estimated from parameters [# s-1]
 
   widths(:) = width
   widths(1) = nin
@@ -154,7 +154,7 @@ subroutine time_ANN(nlayers, nin, width, nout, nsamp, nits, nxy, impl, label)
         call cpu_time(start)
         do iter = 1, aits ! Make many passes to reduce sampling error
           do ij = 1, nxy
-            call ANN_apply_vector_v1(x_fs(:,ij), y_fs(:,ij), ANN)
+            call ANN_apply_vector_orig(x_fs(:,ij), y_fs(:,ij), ANN)
           enddo
         enddo
         call cpu_time(finish)
@@ -162,7 +162,7 @@ subroutine time_ANN(nlayers, nin, width, nout, nsamp, nits, nxy, impl, label)
         call cpu_time(start)
         do iter = 1, aits ! Make many passes to reduce sampling error
           do ij = 1, nxy
-            call ANN_apply_vector_v2(x_fs(:,ij), y_fs(:,ij), ANN)
+            call ANN_apply_vector_oi(x_fs(:,ij), y_fs(:,ij), ANN)
           enddo
         enddo
         call cpu_time(finish)
@@ -170,7 +170,7 @@ subroutine time_ANN(nlayers, nin, width, nout, nsamp, nits, nxy, impl, label)
         call cpu_time(start)
         do iter = 1, aits ! Make many passes to reduce sampling error
           do ij = 1, nxy
-            call ANN_apply_vector_v3(x_fs(:,ij), y_fs(:,ij), ANN)
+            call ANN_apply_vector_io(x_fs(:,ij), y_fs(:,ij), ANN)
           enddo
         enddo
         call cpu_time(finish)
@@ -178,28 +178,28 @@ subroutine time_ANN(nlayers, nin, width, nout, nsamp, nits, nxy, impl, label)
         call cpu_time(start)
         do iter = 1, aits ! Make many passes to reduce sampling error
           do ij = 1, nxy
-            call ANN_apply_vector_v4(x_fs(:,ij), y_fs(:,ij), ANN)
+            call ANN_apply_vector_oit(x_fs(:,ij), y_fs(:,ij), ANN)
           enddo
         enddo
         call cpu_time(finish)
       case (11)
         call cpu_time(start)
         do iter = 1, aits ! Make many passes to reduce sampling error
-          call ANN_apply_array_v1(nxy, x_sf(:,:), y_sf(:,:), ANN)
+          call ANN_apply_array_soi(nxy, x_sf(:,:), y_sf(:,:), ANN)
         enddo
         call cpu_time(finish)
         asamp = nsamp * aits ! Account for working on whole arrays
       case (12)
         call cpu_time(start)
         do iter = 1, aits ! Make many passes to reduce sampling error
-          call ANN_apply_array_v2(nxy, x_sf(:,:), y_sf(:,:), ANN)
+          call ANN_apply_array_sio(nxy, x_sf(:,:), y_sf(:,:), ANN)
         enddo
         call cpu_time(finish)
         asamp = nsamp * aits ! Account for working on whole arrays
       case (13)
         call cpu_time(start)
         do iter = 1, aits ! Make many passes to reduce sampling error
-          call ANN_apply_array_v3(nxy, x_fs(:,:), y_fs(:,:), ANN)
+          call ANN_apply_array_ois(nxy, x_fs(:,:), y_fs(:,:), ANN)
         enddo
         call cpu_time(finish)
         asamp = nsamp * aits ! Account for working on whole arrays
@@ -217,7 +217,7 @@ subroutine time_ANN(nlayers, nin, width, nout, nsamp, nits, nxy, impl, label)
   tstd = tstd / real(nsamp) ! convert to mean of squares
   tstd = tstd - tmean**2  ! convert to variance
   tstd = sqrt( tstd * real(nsamp) / real(nsamp-1) ) ! convert to standard deviation
-  flops = ANN%parameters / tmean
+  words_per_sec = ANN%parameters / ( tmean * 1024 * 1024 )
 
   write(*,"(2x,3a)") '"', trim(label), '": {'
   write(*,"(4x,a,1pe11.4,',')") '"min": ', tmin
@@ -225,7 +225,7 @@ subroutine time_ANN(nlayers, nin, width, nout, nsamp, nits, nxy, impl, label)
   write(*,"(4x,a,1pe11.4,',')") '"std": ', tstd
   write(*,"(4x,a,i0,',')") '"n_samples": ', asamp
   write(*,"(4x,a,1pe11.4,',')") '"max": ', tmax
-  write(*,"(4x,a,1pe11.4,'}')", advance="no") '"flops": ', flops
+  write(*,"(4x,a,1pe11.4,'}')", advance="no") '"MBps": ', words_per_sec
 
 end subroutine time_ANN
 

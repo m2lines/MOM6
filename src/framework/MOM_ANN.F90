@@ -12,16 +12,16 @@ implicit none ; private
 !#include <MOM_memory.h>
 
 public ANN_init, ANN_allocate, ANN_apply, ANN_end, ANN_unit_tests
-public ANN_apply_vector_v1, ANN_apply_vector_v2, ANN_apply_vector_v3
-public ANN_apply_vector_v4
-public ANN_apply_array_v1, ANN_apply_array_v2, ANN_apply_array_v3
+public ANN_apply_vector_orig, ANN_apply_vector_oi, ANN_apply_vector_io
+public ANN_apply_vector_oit
+public ANN_apply_array_soi, ANN_apply_array_sio, ANN_apply_array_ois
 public set_layer, set_input_normalization, set_output_normalization
 public ANN_random, randomize_layer
 
-!> Applies linear layer to input data x and stores the result in y with
-!! y = A*x + b with optional application of the activation function.
+!> Applies ANN to x, returning results in y
 interface ANN_apply
-  module procedure ANN_apply_vector_v1
+  module procedure ANN_apply_vector_orig
+  module procedure ANN_apply_array_sio
 end interface ANN_apply
 
 !> Type for a single Linear layer of ANN,
@@ -205,7 +205,7 @@ subroutine ANN_test(CS, NNfile)
   call MOM_read_data(NNfile, 'y_test', y_test)
 
   ! Compute prediction
-  call ANN_apply_vector_v1(x_test, y_pred, CS)
+  call ANN_apply_vector_orig(x_test, y_pred, CS)
 
   relative_error = maxval(abs(y_pred(:) - y_test(:))) / maxval(abs(y_test(:)))
 
@@ -249,7 +249,10 @@ pure elemental function activation_fn(x) result (y)
 end function activation_fn
 
 !> Single application of ANN inference using vector input and output
-subroutine ANN_apply_vector_v1(x, y, CS)
+!!
+!! This implementation is the simplest using allocation and de-allocation
+!! of temporary arrays
+subroutine ANN_apply_vector_orig(x, y, CS)
   type(ANN_CS), intent(in)    :: CS                               !< ANN instance
   real,         intent(in)    :: x(CS%layer_sizes(1))             !< Inputs [arbitrary]
   real,         intent(inout) :: y(CS%layer_sizes(CS%num_layers)) !< Outputs [arbitrary]
@@ -266,7 +269,7 @@ subroutine ANN_apply_vector_v1(x, y, CS)
   ! Apply Linear layers
   do i = 1, CS%num_layers-1
     allocate(x_2(CS%layer_sizes(i+1)))
-    call layer_apply_v1(x_1, x_2, CS%layers(i))
+    call layer_apply_orig(x_1, x_2, CS%layers(i))
     deallocate(x_1)
     allocate(x_1(CS%layer_sizes(i+1)))
     x_1(:) = x_2(:)
@@ -285,7 +288,7 @@ subroutine ANN_apply_vector_v1(x, y, CS)
   !> Applies linear layer to input data x and stores the result in y with
   !! y = A*x + b with optional application of the activation function so the
   !! overall operations is ReLU(A*x + b)
-  subroutine layer_apply_v1(x, y, layer)
+  subroutine layer_apply_orig(x, y, layer)
     type(layer_type), intent(in)    :: layer                 !< Linear layer
     real,             intent(in)    :: x(layer%input_width)  !< Input vector [nondim]
     real,             intent(inout) :: y(layer%output_width) !< Output vector [nondim]
@@ -303,11 +306,14 @@ subroutine ANN_apply_vector_v1(x, y, CS)
     ! Apply activation function
     if (layer%activation) y(:) = activation_fn(y(:))
 
-  end subroutine layer_apply_v1
-end subroutine ANN_apply_vector_v1
+  end subroutine layer_apply_orig
+end subroutine ANN_apply_vector_orig
 
 !> Single application of ANN inference using vector input and output
-subroutine ANN_apply_vector_v2(x, y, CS)
+!!
+!! This implementation avoids repeated reallocation of work arrays and uses the
+!! output index for the fastest (inner-most) loop in the layer matrix multiply.
+subroutine ANN_apply_vector_oi(x, y, CS)
   type(ANN_CS), intent(in)    :: CS                               !< ANN instance
   real,         intent(in)    :: x(CS%layer_sizes(1))             !< Inputs [arbitrary]
   real,         intent(inout) :: y(CS%layer_sizes(CS%num_layers)) !< Outputs [arbitrary]
@@ -325,11 +331,11 @@ subroutine ANN_apply_vector_v2(x, y, CS)
 
   ! Apply Linear layers
   do i = 1, CS%num_layers-2, 2
-    call layer_apply_v2(x_1, x_2, CS%layers(i))
-    call layer_apply_v2(x_2, x_1, CS%layers(i+1))
+    call layer_apply_oi(x_1, x_2, CS%layers(i))
+    call layer_apply_oi(x_2, x_1, CS%layers(i+1))
   enddo
   if (mod(CS%num_layers,2)==0) then
-    call layer_apply_v2(x_1, x_2, CS%layers(CS%num_layers-1))
+    call layer_apply_oi(x_1, x_2, CS%layers(CS%num_layers-1))
     ! Un-normalize output
     do o = 1, CS%layer_sizes(CS%num_layers)
       y(o) = x_2(o) * CS%output_norms(o) + CS%output_means(o)
@@ -348,7 +354,7 @@ subroutine ANN_apply_vector_v2(x, y, CS)
   !> Applies linear layer to input data x and stores the result in y with
   !! y = A*x + b with optional application of the activation function so the
   !! overall operations is ReLU(A*x + b)
-  subroutine layer_apply_v2(x, y, layer)
+  subroutine layer_apply_oi(x, y, layer)
     type(layer_type), intent(in)    :: layer                 !< Linear layer
     real,             intent(in)    :: x(layer%input_width)  !< Input vector [nondim]
     real,             intent(inout) :: y(layer%output_width) !< Output vector [nondim]
@@ -366,11 +372,14 @@ subroutine ANN_apply_vector_v2(x, y, CS)
     ! Apply activation function
     if (layer%activation) y(:) = activation_fn(y(:))
 
-  end subroutine layer_apply_v2
-end subroutine ANN_apply_vector_v2
+  end subroutine layer_apply_oi
+end subroutine ANN_apply_vector_oi
 
 !> Single application of ANN inference using vector input and output
-subroutine ANN_apply_vector_v3(x, y, CS)
+!!
+!! This implementation avoids repeated reallocation of work arrays and uses the
+!! input index for the fastest (inner-most) loop in the layer matrix multiply.
+subroutine ANN_apply_vector_io(x, y, CS)
   type(ANN_CS), intent(in)    :: CS                               !< ANN instance
   real,         intent(in)    :: x(CS%layer_sizes(1))             !< Inputs [arbitrary]
   real,         intent(inout) :: y(CS%layer_sizes(CS%num_layers)) !< Outputs [arbitrary]
@@ -388,11 +397,11 @@ subroutine ANN_apply_vector_v3(x, y, CS)
 
   ! Apply Linear layers
   do i = 1, CS%num_layers-2, 2
-    call layer_apply_v3(x_1, x_2, CS%layers(i))
-    call layer_apply_v3(x_2, x_1, CS%layers(i+1))
+    call layer_apply_io(x_1, x_2, CS%layers(i))
+    call layer_apply_io(x_2, x_1, CS%layers(i+1))
   enddo
   if (mod(CS%num_layers,2)==0) then
-    call layer_apply_v3(x_1, x_2, CS%layers(CS%num_layers-1))
+    call layer_apply_io(x_1, x_2, CS%layers(CS%num_layers-1))
     ! Un-normalize output
     do o = 1, CS%layer_sizes(CS%num_layers)
       y(o) = x_2(o) * CS%output_norms(o) + CS%output_means(o)
@@ -411,7 +420,7 @@ subroutine ANN_apply_vector_v3(x, y, CS)
   !> Applies linear layer to input data x and stores the result in y with
   !! y = A*x + b with optional application of the activation function so the
   !! overall operations is ReLU(A*x + b)
-  subroutine layer_apply_v3(x, y, layer)
+  subroutine layer_apply_io(x, y, layer)
     type(layer_type), intent(in)    :: layer                 !< Linear layer
     real,             intent(in)    :: x(layer%input_width)  !< Input vector [nondim]
     real,             intent(inout) :: y(layer%output_width) !< Output vector [nondim]
@@ -429,11 +438,16 @@ subroutine ANN_apply_vector_v3(x, y, CS)
     ! Apply activation function
     if (layer%activation) y(:) = activation_fn(y(:))
 
-  end subroutine layer_apply_v3
-end subroutine ANN_apply_vector_v3
+  end subroutine layer_apply_io
+end subroutine ANN_apply_vector_io
 
 !> Single application of ANN inference using vector input and output
-subroutine ANN_apply_vector_v4(x, y, CS)
+!!
+!! This implementation avoids repeated reallocation of work arrays and uses the
+!! output index for the fastest (inner-most) loop in the layer matrix multiply
+!! and also uses the transpose of the weight matrix A which has input as the
+!! fastest index.
+subroutine ANN_apply_vector_oit(x, y, CS)
   type(ANN_CS), intent(in)    :: CS                               !< ANN instance
   real,         intent(in)    :: x(CS%layer_sizes(1))             !< Inputs [arbitrary]
   real,         intent(inout) :: y(CS%layer_sizes(CS%num_layers)) !< Outputs [arbitrary]
@@ -451,11 +465,11 @@ subroutine ANN_apply_vector_v4(x, y, CS)
 
   ! Apply Linear layers
   do l = 1, CS%num_layers-2, 2
-    call layer_apply_v4(x_1, x_2, CS%layers(l))
-    call layer_apply_v4(x_2, x_1, CS%layers(l+1))
+    call layer_apply_oit(x_1, x_2, CS%layers(l))
+    call layer_apply_oit(x_2, x_1, CS%layers(l+1))
   enddo
   if (mod(CS%num_layers,2)==0) then
-    call layer_apply_v4(x_1, x_2, CS%layers(CS%num_layers-1))
+    call layer_apply_oit(x_1, x_2, CS%layers(CS%num_layers-1))
     ! Un-normalize output
     do o = 1, CS%layer_sizes(CS%num_layers)
       y(o) = x_2(o) * CS%output_norms(o) + CS%output_means(o)
@@ -474,7 +488,7 @@ subroutine ANN_apply_vector_v4(x, y, CS)
   !> Applies linear layer to input data x and returns the result in y with
   !! y = A*x + b with optional application of the activation function so the
   !! overall operations is ReLU(A*x + b)
-  subroutine layer_apply_v4(x, y, layer)
+  subroutine layer_apply_oit(x, y, layer)
     type(layer_type), intent(in)    :: layer                 !< Linear layer
     real,             intent(in)    :: x(layer%input_width)  !< Input vector [nondim]
     real,             intent(inout) :: y(layer%output_width) !< Output vector [nondim]
@@ -492,12 +506,16 @@ subroutine ANN_apply_vector_v4(x, y, CS)
     ! Apply activation function
     if (layer%activation) y(:) = activation_fn(y(:))
 
-  end subroutine layer_apply_v4
-end subroutine ANN_apply_vector_v4
+  end subroutine layer_apply_oit
+end subroutine ANN_apply_vector_oit
 
 !> Single application of ANN inference using array input and output
 !! with (space,feature) indexing
-subroutine ANN_apply_array_v1(nij, x, y, CS)
+!!
+!! This implementation uses the space index for the fastest (inner-most) loop
+!! in the layer matrix multiply, with the output index as the next fastest loop,
+!! and uses the weights matrix A(output,index).
+subroutine ANN_apply_array_soi(nij, x, y, CS)
   type(ANN_CS), intent(in)    :: CS !< ANN control structure
   integer,      intent(in)    :: nij !< Size of spatial dimension
   real,         intent(in)    :: x(nij, CS%layer_sizes(1)) !< input [arbitrary]
@@ -516,11 +534,11 @@ subroutine ANN_apply_array_v1(nij, x, y, CS)
 
   ! Apply Linear layers
   do l = 1, CS%num_layers-2, 2
-    call layer_apply_v1(nij, x_1, x_2, CS%layers(l))
-    call layer_apply_v1(nij, x_2, x_1, CS%layers(l+1))
+    call layer_apply_soi(nij, x_1, x_2, CS%layers(l))
+    call layer_apply_soi(nij, x_2, x_1, CS%layers(l+1))
   enddo
   if (mod(CS%num_layers,2)==0) then
-    call layer_apply_v1(nij, x_1, x_2, CS%layers(CS%num_layers-1))
+    call layer_apply_soi(nij, x_1, x_2, CS%layers(CS%num_layers-1))
     ! Un-normalize output
     do o = 1, CS%layer_sizes(CS%num_layers)
       y(:,o) = x_2(:,o) * CS%output_norms(o) + CS%output_means(o)
@@ -539,7 +557,7 @@ subroutine ANN_apply_array_v1(nij, x, y, CS)
   !> Applies linear layer to input data x and stores the result in y with
   !! y = A*x + b with optional application of the activation function so the
   !! overall operations is ReLU(A*x + b)
-  subroutine layer_apply_v1(nij, x, y, layer)
+  subroutine layer_apply_soi(nij, x, y, layer)
     type(layer_type), intent(in)    :: layer !< Linear layer
     integer,          intent(in)    :: nij   !< Size of spatial dimension
     real,             intent(in)    :: x(nij, layer%input_width) !< Input vector [nondim]
@@ -560,12 +578,17 @@ subroutine ANN_apply_array_v1(nij, x, y, CS)
     ! Apply activation function
     if (layer%activation) y(:,:) = activation_fn(y(:,:))
 
-  end subroutine layer_apply_v1
-end subroutine ANN_apply_array_v1
+  end subroutine layer_apply_soi
+end subroutine ANN_apply_array_soi
 
 !> Single application of ANN inference using array input and output
 !! with (space,feature) indexing
-subroutine ANN_apply_array_v2(nij, x, y, CS)
+!!
+!! This implementation uses the space index for the fastest (inner-most) loop
+!! in the layer matrix multiply, with the input index as the next fastest loop,
+!! and uses the weights matrix A(output,index). It also applies the activation
+!! function within the outer loop of the matrix multiply.
+subroutine ANN_apply_array_sio(nij, x, y, CS)
   type(ANN_CS), intent(in)    :: CS !< ANN control structure
   integer,      intent(in)    :: nij !< Size of spatial dimension
   real,         intent(in)    :: x(nij, CS%layer_sizes(1)) !< input [arbitrary]
@@ -584,11 +607,11 @@ subroutine ANN_apply_array_v2(nij, x, y, CS)
 
   ! Apply Linear layers
   do l = 1, CS%num_layers-2, 2
-    call layer_apply_v2(nij, x_1, x_2, CS%layers(l))
-    call layer_apply_v2(nij, x_2, x_1, CS%layers(l+1))
+    call layer_apply_sio(nij, x_1, x_2, CS%layers(l))
+    call layer_apply_sio(nij, x_2, x_1, CS%layers(l+1))
   enddo
   if (mod(CS%num_layers,2)==0) then
-    call layer_apply_v2(nij, x_1, x_2, CS%layers(CS%num_layers-1))
+    call layer_apply_sio(nij, x_1, x_2, CS%layers(CS%num_layers-1))
     ! Un-normalize output
     do o = 1, CS%layer_sizes(CS%num_layers)
       y(:,o) = x_2(:,o) * CS%output_norms(o) + CS%output_means(o)
@@ -607,7 +630,7 @@ subroutine ANN_apply_array_v2(nij, x, y, CS)
   !> Applies linear layer to input data x and stores the result in y with
   !! y = A*x + b with optional application of the activation function so the
   !! overall operations is ReLU(A*x + b)
-  subroutine layer_apply_v2(nij, x, y, layer)
+  subroutine layer_apply_sio(nij, x, y, layer)
     type(layer_type), intent(in)    :: layer !< Linear layer
     integer,          intent(in)    :: nij   !< Size of spatial dimension
     real,             intent(in)    :: x(nij, layer%input_width) !< Input vector [nondim]
@@ -626,12 +649,16 @@ subroutine ANN_apply_array_v2(nij, x, y, CS)
       if (layer%activation) y(:,o) = activation_fn(y(:,o))
     enddo
 
-  end subroutine layer_apply_v2
-end subroutine ANN_apply_array_v2
+  end subroutine layer_apply_sio
+end subroutine ANN_apply_array_sio
 
 !> Single application of ANN inference using array input and output
 !! with (feature,space) indexing
-subroutine ANN_apply_array_v3(nij, x, y, CS)
+!!
+!! This implementation uses the output index for the fastest (inner-most) loop
+!! in the layer matrix multiply, with the input index as the next fastest loop,
+!! and uses the weights matrix A(output,index).
+subroutine ANN_apply_array_ois(nij, x, y, CS)
   type(ANN_CS), intent(in)    :: CS !< ANN control structure
   integer,      intent(in)    :: nij !< Size of spatial dimension
   real,         intent(in)    :: x(CS%layer_sizes(1), nij) !< input [arbitrary]
@@ -654,11 +681,11 @@ subroutine ANN_apply_array_v3(nij, x, y, CS)
 
   ! Apply Linear layers
   do l = 1, CS%num_layers-2, 2
-    call layer_apply_v3(nij, bufw, x_1, x_2, CS%layers(l))
-    call layer_apply_v3(nij, bufw, x_2, x_1, CS%layers(l+1))
+    call layer_apply_ois(nij, bufw, x_1, x_2, CS%layers(l))
+    call layer_apply_ois(nij, bufw, x_2, x_1, CS%layers(l+1))
   enddo
   if (mod(CS%num_layers,2)==0) then
-    call layer_apply_v3(nij, bufw, x_1, x_2, CS%layers(CS%num_layers-1))
+    call layer_apply_ois(nij, bufw, x_1, x_2, CS%layers(CS%num_layers-1))
     ! Un-normalize output
     do s = 1, nij
       do o = 1, CS%layer_sizes(CS%num_layers)
@@ -681,7 +708,7 @@ subroutine ANN_apply_array_v3(nij, x, y, CS)
   !> Applies linear layer to input data x and stores the result in y with
   !! y = A*x + b with optional application of the activation function so the
   !! overall operations is ReLU(A*x + b)
-  subroutine layer_apply_v3(nij, bufw, x, y, layer)
+  subroutine layer_apply_ois(nij, bufw, x, y, layer)
     type(layer_type), intent(in)    :: layer !< Linear layer
     integer,          intent(in)    :: nij   !< Size of spatial dimension
     integer,          intent(in)    :: bufw  !< Width of work space
@@ -713,8 +740,8 @@ subroutine ANN_apply_array_v3(nij, x, y, CS)
       enddo
     endif
 
-  end subroutine layer_apply_v3
-end subroutine ANN_apply_array_v3
+  end subroutine layer_apply_ois
+end subroutine ANN_apply_array_ois
 
 !> Sets weights and bias for a single layer
 subroutine set_layer(ANN, layer, weights, biases, activation)
@@ -892,7 +919,7 @@ logical function ANN_unit_tests(verbose)
                                   0.,0.,1.,0., &
                                   0.,0.,0.,1.], [4,4]), [0.,0.,0.,0.], .true.)
   call set_layer(ANN, 2, reshape([1.,1.,1.,1.], [1,4]), [0.], .false.)
-  call ANN_apply_vector_v1([-1.,0.,1.,2.], y, ANN)
+  call ANN_apply_vector_orig([-1.,0.,1.,2.], y, ANN)
   call test%real_scalar(y(1), 3., 'Rectifier+summation')
 
   ! as above but with biases
@@ -907,7 +934,7 @@ logical function ANN_unit_tests(verbose)
                                   0.,0.,1.,0., &
                                   0.,0.,0.,1.], [4,4]), [1.,1.,1.,1.], .true.)
   call set_layer(ANN, 2, reshape([1.,1.,1.,1.], [1,4]), [3.], .false.)
-  call ANN_apply_vector_v1([-2.,-1.,0.,1.], y, ANN)
+  call ANN_apply_vector_orig([-2.,-1.,0.,1.], y, ANN)
   call test%real_scalar(y(1), 6., 'Rectifier+summation+bias')
 
   ! as above but with normalization of inputs and outputs
@@ -917,7 +944,7 @@ logical function ANN_unit_tests(verbose)
   ! De-normalized output: 2 (using mean=-10, norm=2)
   call set_input_normalization(ANN, means=[4.,4.,4.,4.], norms=[0.5,0.5,0.5,0.5])
   call set_output_normalization(ANN, norms=[2.], means=[-10.])
-  call ANN_apply_vector_v1([0.,2.,4.,6.], y, ANN)
+  call ANN_apply_vector_orig([0.,2.,4.,6.], y, ANN)
   call test%real_scalar(y(1), 2., 'Rectifier+summation+bias+norms')
 
   deallocate( y )
@@ -934,35 +961,35 @@ logical function ANN_unit_tests(verbose)
   call set_layer(ANN, 3, reshape([1.],[1,1]), [0.], .false.)
   call set_input_normalization(ANN, means=[4.,4.,4.,4.], norms=[0.5,0.5,0.5,0.5])
   call set_output_normalization(ANN, norms=[2.], means=[-10.])
-  call ANN_apply_vector_v1([0.,2.,4.,6.], y, ANN)
+  call ANN_apply_vector_orig([0.,2.,4.,6.], y, ANN)
   call test%real_scalar(y(1), 2., 'Rectifier+summation+bias+norms 4-layer')
 
   ! as above with v2 of ANN_apply
-  call ANN_apply_vector_v2([0.,2.,4.,6.], y, ANN)
+  call ANN_apply_vector_oi([0.,2.,4.,6.], y, ANN)
   call test%real_scalar(y(1), 2., 'Rectifier+summation+bias+norms 4-layer v2')
 
   ! as above with v3 of ANN_apply
-  call ANN_apply_vector_v3([0.,2.,4.,6.], y, ANN)
+  call ANN_apply_vector_io([0.,2.,4.,6.], y, ANN)
   call test%real_scalar(y(1), 2., 'Rectifier+summation+bias+norms 4-layer v3')
 
   ! as above with v4 of ANN_apply
-  call ANN_apply_vector_v4([0.,2.,4.,6.], y, ANN)
+  call ANN_apply_vector_oit([0.,2.,4.,6.], y, ANN)
   call test%real_scalar(y(1), 2., 'Rectifier+summation+bias+norms 4-layer v4')
   deallocate( y )
 
   ! as above with v4 of ANN_apply applied to 2d inputs, x(space,feature)
   allocate( y2(1,2) )
-  call ANN_apply_array_v1(2, reshape([0.,1.,2.,3.,4.,5.,6.,7.],[2,4]), y2, ANN)
+  call ANN_apply_array_soi(2, reshape([0.,1.,2.,3.,4.,5.,6.,7.],[2,4]), y2, ANN)
   call test%real_arr(2, y2, [2.,5.], 'Rectifier+summation+bias+norms 4-layer array v1')
 
   ! as above with v5 of ANN_apply applied to 2d inputs, x(space,feature)
-  call ANN_apply_array_v2(2, reshape([0.,1.,2.,3.,4.,5.,6.,7.],[2,4]), y2, ANN)
+  call ANN_apply_array_sio(2, reshape([0.,1.,2.,3.,4.,5.,6.,7.],[2,4]), y2, ANN)
   call test%real_arr(2, y2, [2.,5.], 'Rectifier+summation+bias+norms 4-layer array v2')
   deallocate( y2 )
 
   ! as above with v6 of ANN_apply applied to 2d inputs, x(feature,space)
   allocate( y2(2,1) )
-  call ANN_apply_array_v3(2, reshape([0.,2.,4.,6.,1.,3.,5.,7.],[4,2]), y2, ANN)
+  call ANN_apply_array_ois(2, reshape([0.,2.,4.,6.,1.,3.,5.,7.],[4,2]), y2, ANN)
   call test%real_arr(2, y2, [2.,5.], 'Rectifier+summation+bias+norms 4-layer array v3')
   deallocate( y2 )
 
@@ -980,21 +1007,21 @@ logical function ANN_unit_tests(verbose)
     deallocate( y )
     call ANN_random(ANN, nlay, widths)
     allocate( x(widths(1)), y(widths(nlay)), y_good(widths(nlay)) )
-    call ANN_apply_vector_v1(x, y_good, ANN)
-    call ANN_apply_vector_v2(x, y, ANN)
+    call ANN_apply_vector_orig(x, y_good, ANN)
+    call ANN_apply_vector_oi(x, y, ANN)
     rand_res = rand_res .or. maxval( abs( y(:) - y_good(:) ) ) > 0. ! Check results from v2 = v1
-    call ANN_apply_vector_v3(x, y, ANN)
+    call ANN_apply_vector_io(x, y, ANN)
     rand_res = rand_res .or. maxval( abs( y(:) - y_good(:) ) ) > 0. ! Check results from v3 = v1
-    call ANN_apply_vector_v4(x, y, ANN)
+    call ANN_apply_vector_oit(x, y, ANN)
     rand_res = rand_res .or. maxval( abs( y(:) - y_good(:) ) ) > 0. ! Check results from v4 = v1
     allocate( x2(20,widths(1)), y2(20,widths(nlay)) ) ! 2D input, output
     do i = 1, 20
       x2(i,:) = x(:)
     enddo
-    call ANN_apply_array_v1(20, x2, y2, ANN)
+    call ANN_apply_array_soi(20, x2, y2, ANN)
     rand_res = rand_res .or. maxval( abs( maxval(y2(:,:),1) - y_good(:) ) ) > 0. ! Check results from array v1 = v1
     rand_res = rand_res .or. maxval( abs( minval(y2(:,:),1) - y_good(:) ) ) > 0. ! Check results from array v1 = v1
-    call ANN_apply_array_v2(20, x2, y2, ANN)
+    call ANN_apply_array_sio(20, x2, y2, ANN)
     rand_res = rand_res .or. maxval( abs( maxval(y2(:,:),1) - y_good(:) ) ) > 0. ! Check results from array v2 = v1
     rand_res = rand_res .or. maxval( abs( minval(y2(:,:),1) - y_good(:) ) ) > 0. ! Check results from array v2 = v1
     deallocate( x2, y2 )
@@ -1002,7 +1029,7 @@ logical function ANN_unit_tests(verbose)
     do i = 1, 20
       x2(1:widths(1),i) = x(:)
     enddo
-    call ANN_apply_array_v3(20, x2, y2, ANN)
+    call ANN_apply_array_ois(20, x2, y2, ANN)
     rand_res = rand_res .or. maxval( abs( maxval(y2(:,:),2) - y_good(:) ) ) > 0. ! Check results from array v3 = v1
     rand_res = rand_res .or. maxval( abs( minval(y2(:,:),2) - y_good(:) ) ) > 0. ! Check results from array v3 = v1
     deallocate( x, y, y_good, x2, y2 )
@@ -1013,5 +1040,32 @@ logical function ANN_unit_tests(verbose)
   ANN_unit_tests = test%summarize('ANN_unit_tests')
 
 end function ANN_unit_tests
+
+!> \namespace mom_ann
+!!
+!! The mom_ann module is a pure fortran implementation of fully-connected feed-forward
+!! networks to facilitate easy evaluation of data-driven functions in MOM6. For performant
+!! implementations or for novel architectires, using machine-learning libraries (e.g. via
+!! mom_database_comms) are necessary, or at least likely to be more efficient.
+!!
+!! The artificial neural network (ANN) understood by this MOM6 module has \f$ N \f$ layers,
+!! including the input-layer and output-layer, thus requireing \f$ N \geq 2\f$.
+!!
+!! The output values (neurons or nodes) of any layer other than the input layer (i.e. \f$ l>1 \f$) are
+!! \f[
+!! y_{l,j} = f_l( b_{l,j} + A_{l,j,i} x_{l-1,i} )
+!! \f]
+!! where \f$ f(x) = max(0, x) \f$ is the ReLU activation function, \f$b_{l,j}\f$ is a bias for each neuron,
+!! $\f$A_{l,j,i}\f$ are a rectangular matrix of weights for each layer, and \f$x_{l-1,i}\f$ are the outputs
+!! of the previous layer, \f$l-1\f$. The subscript on \f$ f_l() \f$ indicates the activation function is
+!! optional for each layer.
+!!
+!! Currently, the performance of various implementations is dependent on the shape/size of the network and
+!! the size of input data. For this reason we provide several versions that all yield the same result but
+!! for differently shaped inputs.
+!!
+!! \image html https://upload.wikimedia.org/wikipedia/commons/4/46/Colored_neural_network.svg
+!! Fig: A three layer network with 3 inputs, 2 outputs, and 1 hidden layer. There are two rectanglar
+!! matrices of weights (black arrows). The bias for each neuron is implied."
 
 end module MOM_ANN
