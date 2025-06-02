@@ -4,9 +4,8 @@ program time_MOM_ANN
 
 use MOM_ANN, only : ANN_CS
 use MOM_ANN, only : ANN_allocate, ANN_apply, ANN_end
-use MOM_ANN, only : ANN_apply_vector_orig, ANN_apply_vector_oi, ANN_apply_vector_io
-use MOM_ANN, only : ANN_apply_vector_oit
-use MOM_ANN, only : ANN_apply_array_soi, ANN_apply_array_sio, ANN_apply_array_ois
+use MOM_ANN, only : ANN_apply_vector_orig, ANN_apply_vector_oi
+use MOM_ANN, only : ANN_apply_array_sio
 use MOM_ANN, only : ANN_random
 
 implicit none
@@ -73,19 +72,7 @@ call time_ANN(nlayers, nin, layer_width, nout, nsamp, nits, nxy, &
               2, "MOM_ANN:ANN_apply_vector_oi(array)")
 write(*,"(',')")
 call time_ANN(nlayers, nin, layer_width, nout, nsamp, nits, nxy, &
-              3, "MOM_ANN:ANN_apply_vector_io(array)")
-write(*,"(',')")
-call time_ANN(nlayers, nin, layer_width, nout, nsamp, nits, nxy, &
-              4, "MOM_ANN:ANN_apply_vector_oit(array)")
-write(*,"(',')")
-call time_ANN(nlayers, nin, layer_width, nout, nsamp, nits, nxy, &
-              11, "MOM_ANN:ANN_apply_array_soi(array)")
-write(*,"(',')")
-call time_ANN(nlayers, nin, layer_width, nout, nsamp, nits, nxy, &
               12, "MOM_ANN:ANN_apply_array_sio(array)")
-write(*,"(',')")
-call time_ANN(nlayers, nin, layer_width, nout, nsamp, nits, nxy, &
-              13, "MOM_ANN:ANN_apply_array_ois(array)")
 write(*,"()")
 
 write(*,'(a)') "}"
@@ -166,40 +153,10 @@ subroutine time_ANN(nlayers, nin, width, nout, nsamp, nits, nxy, impl, label)
           enddo
         enddo
         call cpu_time(finish)
-      case (3)
-        call cpu_time(start)
-        do iter = 1, aits ! Make many passes to reduce sampling error
-          do ij = 1, nxy
-            call ANN_apply_vector_io(x_fs(:,ij), y_fs(:,ij), ANN)
-          enddo
-        enddo
-        call cpu_time(finish)
-      case (4)
-        call cpu_time(start)
-        do iter = 1, aits ! Make many passes to reduce sampling error
-          do ij = 1, nxy
-            call ANN_apply_vector_oit(x_fs(:,ij), y_fs(:,ij), ANN)
-          enddo
-        enddo
-        call cpu_time(finish)
-      case (11)
-        call cpu_time(start)
-        do iter = 1, aits ! Make many passes to reduce sampling error
-          call ANN_apply_array_soi(nxy, x_sf(:,:), y_sf(:,:), ANN)
-        enddo
-        call cpu_time(finish)
-        asamp = nsamp * aits ! Account for working on whole arrays
       case (12)
         call cpu_time(start)
         do iter = 1, aits ! Make many passes to reduce sampling error
           call ANN_apply_array_sio(nxy, x_sf(:,:), y_sf(:,:), ANN)
-        enddo
-        call cpu_time(finish)
-        asamp = nsamp * aits ! Account for working on whole arrays
-      case (13)
-        call cpu_time(start)
-        do iter = 1, aits ! Make many passes to reduce sampling error
-          call ANN_apply_array_ois(nxy, x_fs(:,:), y_fs(:,:), ANN)
         enddo
         call cpu_time(finish)
         asamp = nsamp * aits ! Account for working on whole arrays
