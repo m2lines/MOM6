@@ -351,6 +351,7 @@ type, public :: barotropic_CS ; private
   integer :: id_BTC_vbt_NN = -1, id_BTC_vbt_SS = -1
   integer :: id_BTC_FA_u_rat0 = -1, id_BTC_FA_v_rat0 = -1, id_BTC_FA_h_rat0 = -1
   integer :: id_uhbt0 = -1, id_vhbt0 = -1
+  integer :: id_SSH_u_OBC = -1, id_SSH_v_OBC = -1, id_ubt_OBC = -1, id_vbt_OBC = -1
   !>@}
 
 end type barotropic_CS
@@ -1680,6 +1681,20 @@ subroutine btstep(U_in, V_in, eta_in, dt, bc_accel_u, bc_accel_v, forces, pbce, 
                   unscale=GV%m_to_H, scalar_pair=.true.)
     call uvchksum("BT visc_rem_[uv]", visc_rem_u, visc_rem_v, G%HI, &
                   haloshift=1, scalar_pair=.true.)
+
+    if (apply_OBCs) then
+      call uvchksum("BT_OBC%[uv]bt_outer", CS%BT_OBC%ubt_outer,  CS%BT_OBC%vbt_outer, CS%debug_BT_HI, &
+                    symmetric=.true., omit_corners=.true., unscale=US%L_T_to_m_s)
+      if (allocated(CS%BT_OBC%SSH_outer_u) .and. allocated(CS%BT_OBC%SSH_outer_v)) &
+        call uvchksum("BT_OBC%SSH_outer[uv]",  CS%BT_OBC%SSH_outer_u,  CS%BT_OBC%SSH_outer_v, CS%debug_BT_HI, &
+                    symmetric=.true., omit_corners=.true., unscale=US%Z_to_m, scalar_pair=.true.)
+      if (allocated(CS%BT_OBC%Cg_u) .and. allocated(CS%BT_OBC%Cg_v)) &
+        call uvchksum("BT_OBC%Cg_[uv]",  CS%BT_OBC%Cg_u,  CS%BT_OBC%Cg_v, CS%debug_BT_HI, &
+                    symmetric=.true., omit_corners=.true., unscale=US%L_T_to_m_s, scalar_pair=.true.)
+      if (allocated(CS%BT_OBC%dZ_u) .and. allocated(CS%BT_OBC%dZ_v)) &
+        call uvchksum("BT_OBC%dZ_[uv]",  CS%BT_OBC%dZ_u,  CS%BT_OBC%dZ_v, CS%debug_BT_HI, &
+                    symmetric=.true., omit_corners=.true., unscale=US%Z_to_m, scalar_pair=.true.)
+    endif
   endif
 
   if (CS%id_ubtdt > 0) then
@@ -2098,6 +2113,11 @@ subroutine btstep(U_in, V_in, eta_in, dt, bc_accel_u, bc_accel_v, forces, pbce, 
         call post_data(CS%id_BTC_FA_h_rat0, tmp_h, CS%diag)
       endif
     endif
+
+    if (CS%id_SSH_u_OBC > 0) call post_data(CS%id_SSH_u_OBC, CS%BT_OBC%SSH_outer_u(IsdB:IedB,jsd:jed), CS%diag)
+    if (CS%id_SSH_v_OBC > 0) call post_data(CS%id_SSH_v_OBC, CS%BT_OBC%SSH_outer_v(isd:ied,JsdB:JedB), CS%diag)
+    if (CS%id_ubt_OBC > 0) call post_data(CS%id_ubt_OBC, CS%BT_OBC%ubt_outer(IsdB:IedB,jsd:jed), CS%diag)
+    if (CS%id_vbt_OBC > 0) call post_data(CS%id_vbt_OBC, CS%BT_OBC%vbt_outer(isd:ied,JsdB:JedB), CS%diag)
   else
     if (CS%id_frhatu1 > 0) CS%frhatu1(:,:,:) = CS%frhatu(:,:,:)
     if (CS%id_frhatv1 > 0) CS%frhatv1(:,:,:) = CS%frhatv(:,:,:)
@@ -3686,7 +3706,11 @@ subroutine apply_u_velocity_OBCs(ubt, uhbt, ubt_trans, eta, SpV_avg, ubt_old, BT
     elseif (BT_OBC%u_OBC_type(I,j) == FLATHER_OBC) then  ! Eastern Flather OBC
       cfl = dtbt * BT_OBC%Cg_u(I,j) * G%IdxCu(I,j) ! CFL
       u_inlet = cfl*ubt_old(I-1,j) + (1.0-cfl)*ubt_old(I,j)  ! Valid for cfl<1
-      if (GV%Boussinesq) then
+      if (I <= MS%isdw) then
+        ! Do not apply an Eastern Flather OBC at the western halo points on a PE, as doing so would
+        ! create a segmentation fault and this velocity will not propagate through to the next iteration.
+        ssh_in = BT_OBC%SSH_outer_u(I,j)
+      elseif (GV%Boussinesq) then
         ssh_in = GV%H_to_Z*(eta(i,j) + (0.5-cfl)*(eta(i,j)-eta(i-1,j)))      ! internal
       else
         ssh_1 = GV%H_to_RZ * eta(i,j) * SpV_avg(i,j) - (CS%bathyT(i,j) + G%Z_ref)
@@ -3739,7 +3763,11 @@ subroutine apply_u_velocity_OBCs(ubt, uhbt, ubt_trans, eta, SpV_avg, ubt_old, BT
     elseif (BT_OBC%u_OBC_type(I,j) == -FLATHER_OBC) then  ! Western Flather OBC
       cfl = dtbt * BT_OBC%Cg_u(I,j) * G%IdxCu(I,j) ! CFL
       u_inlet = cfl*ubt_old(I+1,j) + (1.0-cfl)*ubt_old(I,j)  ! Valid for cfl<1
-      if (GV%Boussinesq) then
+      if (I >= MS%iedw-1) then
+        ! Do not apply a Western Flather OBC at the eastern halo points on a PE, as doing so would
+        ! create a segmentation fault and this velocity will not propagate through to the next iteration.
+        ssh_in = BT_OBC%SSH_outer_u(I,j)
+      elseif (GV%Boussinesq) then
         ssh_in = GV%H_to_Z*(eta(i+1,j) + (0.5-cfl)*(eta(i+1,j)-eta(i+2,j)))  ! internal
       else
         ssh_1 = GV%H_to_RZ * eta(i+1,j) * SpV_avg(i+1,j) - (CS%bathyT(i+1,j) + G%Z_ref)
@@ -3872,7 +3900,11 @@ subroutine apply_v_velocity_OBCs(vbt, vhbt, vbt_trans, eta, SpV_avg, vbt_old, BT
     elseif (BT_OBC%v_OBC_type(i,J) == FLATHER_OBC) then  ! Northern Flather OBC
       cfl = dtbt * BT_OBC%Cg_v(i,J) * G%IdyCv(i,J) ! CFL
       v_inlet = cfl*vbt_old(i,J-1) + (1.0-cfl)*vbt_old(i,J)  ! Valid for cfl<1
-      if (GV%Boussinesq) then
+      if (J <= MS%jsdw) then
+        ! Do not apply a Northern Flather OBC at the southern halo points on a PE, as doing so would
+        ! create a segmentation fault and this velocity will not propagate through to the next iteration.
+        ssh_in = BT_OBC%SSH_outer_v(i,J)
+      elseif (GV%Boussinesq) then
         ssh_in = GV%H_to_Z*(eta(i,j) + (0.5-cfl)*(eta(i,j)-eta(i,j-1)))      ! internal
       else
         ssh_1 = GV%H_to_RZ * eta(i,j) * SpV_avg(i,j) - (CS%bathyT(i,j) + G%Z_ref)
@@ -3926,7 +3958,11 @@ subroutine apply_v_velocity_OBCs(vbt, vhbt, vbt_trans, eta, SpV_avg, vbt_old, BT
     elseif (BT_OBC%v_OBC_type(i,J) == -FLATHER_OBC) then  ! Southern Flather OBC
       cfl = dtbt * BT_OBC%Cg_v(i,J) * G%IdyCv(i,J) ! CFL
       v_inlet = cfl*vbt_old(i,J+1) + (1.0-cfl)*vbt_old(i,J)  ! Valid for cfl <1
-      if (GV%Boussinesq) then
+      if (J >= MS%jedw-1) then
+        ! Do not apply a Southern Flather OBC at the northern halo points on a PE, as doing so would
+        ! create a segmentation fault and this velocity will not propagate through to the next iteration.
+        ssh_in = BT_OBC%SSH_outer_v(i,J)
+      elseif (GV%Boussinesq) then
         ssh_in = GV%H_to_Z*(eta(i,j+1) + (0.5-cfl)*(eta(i,j+1)-eta(i,j+2)))  ! internal
       else
         ssh_1 = GV%H_to_RZ * eta(i,j+1) * SpV_avg(i,j+1) - (CS%bathyT(i,j+1) + G%Z_ref)
@@ -3987,7 +4023,7 @@ subroutine initialize_BT_OBC(OBC, BT_OBC, G, CS)
   real :: OBC_sign  ! A sign encoding the direction of the OBC being used at a point [nondim]
   real :: OBC_type  ! A real copy of the integer encoding the type of OBC being used at a point [nondim]
   integer :: i, j, isdw, iedw, jsdw, jedw
-  integer :: l_seg
+  integer :: l_seg, Flather_OBC_in_halo
 
   isdw = CS%isdw ; iedw = CS%iedw ; jsdw = CS%jsdw ; jedw = CS%jedw
 
@@ -4037,27 +4073,48 @@ subroutine initialize_BT_OBC(OBC, BT_OBC, G, CS)
   BT_OBC%is_v_N_obc = iedw + 1 ; BT_OBC%ie_v_N_obc = isdw - 1
   BT_OBC%Js_v_N_obc = jedw + 1 ; BT_OBC%Je_v_N_obc = jsdw - 2
 
+  Flather_OBC_in_halo = 0
   do j=jsdw,jedw ; do I=isdw-1,iedw
     BT_OBC%u_OBC_type(I,j) = nint(u_OBC(I,j))
     if (BT_OBC%u_OBC_type(I,j) < 0) then ! This point has OBC_DIRECTION_W.
-      BT_OBC%Is_u_W_obc = min(I, BT_OBC%Is_u_W_obc) ; BT_OBC%Ie_u_W_obc = max(I, BT_OBC%Ie_u_W_obc)
-      BT_OBC%js_u_W_obc = min(j, BT_OBC%js_u_W_obc) ; BT_OBC%je_u_W_obc = max(j, BT_OBC%je_u_W_obc)
+      if ((BT_OBC%u_OBC_type(I,j) == -FLATHER_OBC) .and. (I >= iedw-1)) then
+        ! There is no need to specify the OBC at this point, but the stencil might need to be increased.
+        Flather_OBC_in_halo = 1
+      else
+        BT_OBC%Is_u_W_obc = min(I, BT_OBC%Is_u_W_obc) ; BT_OBC%Ie_u_W_obc = max(I, BT_OBC%Ie_u_W_obc)
+        BT_OBC%js_u_W_obc = min(j, BT_OBC%js_u_W_obc) ; BT_OBC%je_u_W_obc = max(j, BT_OBC%je_u_W_obc)
+      endif
     endif
     if (BT_OBC%u_OBC_type(I,j) > 0) then ! This point has OBC_DIRECTION_E.
-      BT_OBC%Is_u_E_obc = min(I, BT_OBC%Is_u_E_obc) ; BT_OBC%Ie_u_E_obc = max(I, BT_OBC%Ie_u_E_obc)
-      BT_OBC%js_u_E_obc = min(j, BT_OBC%js_u_E_obc) ; BT_OBC%je_u_E_obc = max(j, BT_OBC%je_u_E_obc)
+      if ((BT_OBC%u_OBC_type(I,j) == FLATHER_OBC) .and. (I <= isdw)) then
+        ! There is no need to specify the OBC at this point, but the stencil might need to be increased.
+        Flather_OBC_in_halo = 1
+      else
+        BT_OBC%Is_u_E_obc = min(I, BT_OBC%Is_u_E_obc) ; BT_OBC%Ie_u_E_obc = max(I, BT_OBC%Ie_u_E_obc)
+        BT_OBC%js_u_E_obc = min(j, BT_OBC%js_u_E_obc) ; BT_OBC%je_u_E_obc = max(j, BT_OBC%je_u_E_obc)
+      endif
     endif
   enddo ; enddo
 
   do J=jsdw-1,jedw ; do i=isdw,iedw
     BT_OBC%v_OBC_type(i,J) = nint(v_OBC(i,J))
-    if (BT_OBC%v_OBC_type(i,J) < 0) then ! This point has OBC_DIRECTION_S.
-      BT_OBC%is_v_S_obc = min(i, BT_OBC%is_v_S_obc) ; BT_OBC%ie_v_S_obc = max(i, BT_OBC%ie_v_S_obc)
-      BT_OBC%Js_v_S_obc = min(J, BT_OBC%Js_v_S_obc) ; BT_OBC%Je_v_S_obc = max(J, BT_OBC%Je_v_S_obc)
+    if (BT_OBC%v_OBC_type(i,J) < 0)  then ! This point has OBC_DIRECTION_S.
+      if ((BT_OBC%v_OBC_type(i,J) == -FLATHER_OBC) .and. (J >= jedw-1)) then
+        ! There is no need to specify the OBC at this point, but the stencil might need to be increased.
+        Flather_OBC_in_halo = 1
+      else
+        BT_OBC%is_v_S_obc = min(i, BT_OBC%is_v_S_obc) ; BT_OBC%ie_v_S_obc = max(i, BT_OBC%ie_v_S_obc)
+        BT_OBC%Js_v_S_obc = min(J, BT_OBC%Js_v_S_obc) ; BT_OBC%Je_v_S_obc = max(J, BT_OBC%Je_v_S_obc)
+      endif
     endif
     if (BT_OBC%v_OBC_type(i,J) > 0) then ! This point has OBC_DIRECTION_N.
-      BT_OBC%is_v_N_obc = min(i, BT_OBC%is_v_N_obc) ; BT_OBC%ie_v_N_obc = max(i, BT_OBC%ie_v_N_obc)
-      BT_OBC%Js_v_N_obc = min(J, BT_OBC%Js_v_N_obc) ; BT_OBC%Je_v_N_obc = max(J, BT_OBC%Je_v_N_obc)
+      if ((BT_OBC%v_OBC_type(i,J) == FLATHER_OBC) .and. (J <= jsdw)) then
+        ! There is no need to specify the OBC at this point, but the stencil might need to be increased.
+        Flather_OBC_in_halo = 1
+      else
+        BT_OBC%is_v_N_obc = min(i, BT_OBC%is_v_N_obc) ; BT_OBC%ie_v_N_obc = max(i, BT_OBC%ie_v_N_obc)
+        BT_OBC%Js_v_N_obc = min(J, BT_OBC%Js_v_N_obc) ; BT_OBC%Je_v_N_obc = max(J, BT_OBC%Je_v_N_obc)
+      endif
     endif
   enddo ; enddo
 
@@ -5998,6 +6055,18 @@ subroutine barotropic_init(u, v, h, Time, G, GV, US, param_file, diag, CS, &
       'Barotropic zonal transport difference', 'm3 s-1', conversion=GV%H_to_m*US%L_to_m**2*US%s_to_T)
   CS%id_vhbt0 = register_diag_field('ocean_model', 'vhbt0', diag%axesCv1, Time, &
       'Barotropic meridional transport difference', 'm3 s-1', conversion=GV%H_to_m*US%L_to_m**2*US%s_to_T)
+  if (associated(OBC)) then
+    if (OBC%Flather_u_BCs_exist_globally .or. OBC%Flather_v_BCs_exist_globally) then
+      CS%id_SSH_u_OBC = register_diag_field('ocean_model', 'SSH_u_OBC', diag%axesCu1, Time, &
+        'Outer sea surface height at u OBC points', 'm', conversion=US%Z_to_m)
+      CS%id_SSH_v_OBC = register_diag_field('ocean_model', 'SSH_v_OBC', diag%axesCv1, Time, &
+          'Outer sea surface height at v OBC points', 'm', conversion=US%Z_to_m)
+      CS%id_ubt_OBC = register_diag_field('ocean_model', 'ubt_OBC', diag%axesCu1, Time, &
+        'Outer u velocity at OBC points', 'm', conversion=US%L_T_to_m_s)
+      CS%id_vbt_OBC = register_diag_field('ocean_model', 'vbt_OBC', diag%axesCv1, Time, &
+        'Outer v velocity at OBC points', 'm', conversion=US%L_T_to_m_s)
+    endif
+  endif
 
   if (CS%id_frhatu1 > 0) allocate(CS%frhatu1(IsdB:IedB,jsd:jed,nz), source=0.)
   if (CS%id_frhatv1 > 0) allocate(CS%frhatv1(isd:ied,JsdB:JedB,nz), source=0.)
