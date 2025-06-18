@@ -669,7 +669,7 @@ subroutine compute_stress_ANN_collocated(G, GV, CS)
   integer :: nij
 
   real, allocatable :: x(:,:)        ! Vector of non-dimensional input features
-                                     ! number of horizontal grid points x 
+                                     ! number of horizontal grid points x
                                      ! (sh_xy, sh_xx, vort_xy) on a stencil    [nondim]
   real, allocatable :: y(:,:)        ! Vector of nondimensional
                                      ! output features number of horizontal grid points x
