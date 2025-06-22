@@ -12,7 +12,7 @@ use MOM_diag_mediator, only : post_data, register_diag_field
 use MOM_domains,       only : create_group_pass, do_group_pass, group_pass_type, &
                               start_group_pass, complete_group_pass
 use MOM_domains,       only : To_North, To_East
-use MOM_domains,       only : pass_var, CORNER
+use MOM_domains,       only : pass_var, pass_vector, CORNER
 use MOM_cpu_clock,     only : cpu_clock_id, cpu_clock_begin, cpu_clock_end
 use MOM_cpu_clock,     only : CLOCK_MODULE, CLOCK_ROUTINE
 use MOM_ANN,           only : ANN_init, ANN_apply_array_sio_r4, ANN_end, ANN_CS
@@ -1222,11 +1222,11 @@ subroutine compute_energy_source(u, v, h, fx, fy, G, GV, CS)
                                  intent(in) :: h     !< Layer thicknesses [H ~> m or kg m-2].
 
   real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)), &
-                                 intent(in) :: fx    !< Zonal acceleration due to convergence of
-                                                     !! along-coordinate stress tensor [L T-2 ~> m s-2]
+                                 intent(inout) :: fx    !< Zonal acceleration due to convergence of
+                                                        !! along-coordinate stress tensor [L T-2 ~> m s-2]
   real, dimension(SZI_(G),SZJB_(G),SZK_(GV)), &
-                                 intent(in) :: fy    !< Meridional acceleration due to convergence
-                                                     !! of along-coordinate stress tensor [L T-2 ~> m s-2]
+                                 intent(inout) :: fy    !< Meridional acceleration due to convergence
+                                                        !! of along-coordinate stress tensor [L T-2 ~> m s-2]
 
   real :: KE_term(SZI_(G),SZJ_(G),SZK_(GV)) ! A term in the kinetic energy budget
                                             ! [H L2 T-3 ~> m3 s-3 or W m-2]
@@ -1240,14 +1240,14 @@ subroutine compute_energy_source(u, v, h, fx, fy, G, GV, CS)
   real :: vh                                ! Transport through meridional faces = v*h*dx,
                                             ! [H L2 T-1 ~> m3 s-1 or kg s-1].
 
-  type(group_pass_type) :: pass_KE_uv       ! A handle used for group halo passes
-
   integer :: is, ie, js, je, Isq, Ieq, Jsq, Jeq, nz
   integer :: i, j, k
 
   if (CS%id_KE_ZB2020 > 0) then
     call cpu_clock_begin(CS%id_clock_source)
-    call create_group_pass(pass_KE_uv, KE_u, KE_v, G%Domain, To_North+To_East)
+    if (.not. G%symmetric) then
+      call pass_vector(fx, fy, G%Domain, To_North+To_East, clock=CS%id_clock_mpi, halo=1)
+    endif
 
     is  = G%isc  ; ie  = G%iec  ; js  = G%jsc  ; je  = G%jec ; nz = GV%ke
     Isq = G%IscB ; Ieq = G%IecB ; Jsq = G%JscB ; Jeq = G%JecB
@@ -1257,17 +1257,17 @@ subroutine compute_energy_source(u, v, h, fx, fy, G, GV, CS)
     do k=1,nz
       KE_u(:,:) = 0.
       KE_v(:,:) = 0.
-      do j=js,je ; do I=Isq,Ieq
+      do j=js,je ; do I=is-1,Ieq
         uh = u(I,j,k) * 0.5 * (G%mask2dT(i,j)*h(i,j,k) + G%mask2dT(i+1,j)*h(i+1,j,k)) * &
           G%dyCu(I,j)
         KE_u(I,j) = uh * G%dxCu(I,j) * fx(I,j,k)
       enddo ; enddo
-      do J=Jsq,Jeq ; do i=is,ie
+      do J=js-1,Jeq ; do i=is,ie
         vh = v(i,J,k) * 0.5 * (G%mask2dT(i,j)*h(i,j,k) + G%mask2dT(i,j+1)*h(i,j+1,k)) * &
           G%dxCv(i,J)
         KE_v(i,J) = vh * G%dyCv(i,J) * fy(i,J,k)
       enddo ; enddo
-      call do_group_pass(pass_KE_uv, G%domain, clock=CS%id_clock_mpi)
+
       do j=js,je ; do i=is,ie
         KE_term(i,j,k) = 0.5 * G%IareaT(i,j) &
             * ((KE_u(I,j) + KE_u(I-1,j)) + (KE_v(i,J) + KE_v(i,J-1)))
