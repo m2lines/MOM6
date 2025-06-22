@@ -5,7 +5,7 @@ program time_MOM_ANN
 use MOM_ANN, only : ANN_CS
 use MOM_ANN, only : ANN_allocate, ANN_apply, ANN_end
 use MOM_ANN, only : ANN_apply_vector_orig, ANN_apply_vector_oi
-use MOM_ANN, only : ANN_apply_array_sio
+use MOM_ANN, only : ANN_apply_array_sio, ANN_apply_array_sio_r4
 use MOM_ANN, only : ANN_random
 
 implicit none
@@ -72,7 +72,10 @@ call time_ANN(nlayers, nin, layer_width, nout, nsamp, nits, nxy, &
               2, "MOM_ANN:ANN_apply_vector_oi(array)")
 write(*,"(',')")
 call time_ANN(nlayers, nin, layer_width, nout, nsamp, nits, nxy, &
-              12, "MOM_ANN:ANN_apply_array_sio(array)")
+              3, "MOM_ANN:ANN_apply_array_sio(array)")
+write(*,"(',')")
+call time_ANN(nlayers, nin, layer_width, nout, nsamp, nits, nxy, &
+              4, "MOM_ANN:ANN_apply_array_sio_r4(array)")
 write(*,"()")
 
 write(*,'(a)') "}"
@@ -131,7 +134,6 @@ subroutine time_ANN(nlayers, nin, width, nout, nsamp, nits, nxy, impl, label)
   do samp = 1, nsamp
     select case (impl)
       case (0)
-        aits = nits
         call cpu_time(start)
         do iter = 1, nits ! Make many passes to reduce sampling error
           call ANN_apply(x_s, y_s, ANN)
@@ -153,10 +155,17 @@ subroutine time_ANN(nlayers, nin, width, nout, nsamp, nits, nxy, impl, label)
           enddo
         enddo
         call cpu_time(finish)
-      case (12)
+      case (3)
         call cpu_time(start)
         do iter = 1, aits ! Make many passes to reduce sampling error
           call ANN_apply_array_sio(nxy, x_sf(:,:), y_sf(:,:), ANN)
+        enddo
+        call cpu_time(finish)
+        asamp = nsamp * aits ! Account for working on whole arrays
+      case (4)
+        call cpu_time(start)
+        do iter = 1, aits ! Make many passes to reduce sampling error
+          call ANN_apply_array_sio_r4(nxy, x_sf(:,:), y_sf(:,:), ANN)
         enddo
         call cpu_time(finish)
         asamp = nsamp * aits ! Account for working on whole arrays
