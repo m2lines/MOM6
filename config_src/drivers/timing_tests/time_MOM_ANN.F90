@@ -104,9 +104,9 @@ subroutine time_ANN(nlayers, nin, width, nout, nsamp, nits, nxy, impl, label)
   real :: x_s(nin) ! Inputs (just features) [nondim]
   real :: y_s(nin) ! Outputs (just features) [nondim]
   real :: x_fs(nin,nxy) ! Inputs (feature, space) [nondim]
-  real :: y_fs(nin,nxy) ! Outputs (feature, space) [nondim]
-  real :: x_sf(nin,nxy) ! Inputs (space, feature) [nondim]
-  real :: y_sf(nin,nxy) ! Outputs (space, feature) [nondim]
+  real :: y_fs(nout,nxy) ! Outputs (feature, space) [nondim]
+  real :: x_sf(nxy,nin) ! Inputs (space, feature) [nondim]
+  real :: y_sf(nxy,nout) ! Outputs (space, feature) [nondim]
   integer :: iter, samp ! Loop counters
   integer :: ij ! Horizontal loop index
   real :: start, finish, timing ! CPU times [s]
@@ -120,6 +120,7 @@ subroutine time_ANN(nlayers, nin, width, nout, nsamp, nits, nxy, impl, label)
   widths(nlayers) = nout
 
   call ANN_random(ANN, nlayers, widths)
+  call random_number(x_s)
   call random_number(x_fs)
   call random_number(x_sf)
 
