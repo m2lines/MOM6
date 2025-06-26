@@ -511,14 +511,17 @@ subroutine ANN_apply_array_sio_r4(nij, x, y, CS)
     real(4),          intent(inout) :: y(nij, layer%output_width) !< Output vector [nondim]
     ! Local variables
     integer :: i, o ! Input, output indices
+    real(4), parameter :: boost = 1.e+10 ! Rescale inputs to prevent underflow
+    real(4), parameter :: inv_boost = 1.e-10 ! Rescales the result back
 
     do o = 1, layer%output_width
       ! Add bias
-      y(:,o) = layer%b_r4(o)
+      y(:,o) = layer%b_r4(o) * boost
       ! Multiply by kernel
       do i = 1, layer%input_width
-        y(:,o) = y(:,o) + x(:,i) * layer%A_r4(o, i)
+        y(:,o) = y(:,o) + (x(:,i) * boost) * layer%A_r4(o, i)
       enddo
+      y(:,o) = y(:,o) * inv_boost
       ! Apply activation function
       if (layer%activation) y(:,o) = activation_fn_r4(y(:,o))
     enddo
