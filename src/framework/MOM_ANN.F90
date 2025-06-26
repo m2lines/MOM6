@@ -784,6 +784,8 @@ logical function ANN_unit_tests(verbose)
     deallocate( y )
     call ANN_random(ANN, nlay, widths)
     allocate( x(widths(1)), y(widths(nlay)), y_good(widths(nlay)) )
+    call random_number(x)
+    x(:) = 2. * x(:) - 1.
     call ANN_apply_vector_orig(x, y_good, ANN)
     call ANN_apply_vector_oi(x, y, ANN)
     rand_res = rand_res .or. maxval( abs( y(:) - y_good(:) ) ) > 0. ! Check results from v2 = v1
