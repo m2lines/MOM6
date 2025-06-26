@@ -511,8 +511,10 @@ subroutine ANN_apply_array_sio_r4(nij, x, y, CS)
     real(4),          intent(inout) :: y(nij, layer%output_width) !< Output vector [nondim]
     ! Local variables
     integer :: i, o ! Input, output indices
-    real(4), parameter :: boost = 1.e+10 ! Rescale inputs to prevent underflow
-    real(4), parameter :: inv_boost = 1.e-10 ! Rescales the result back
+    ! We introduce rescaling which gives bitwise the same answer if there is no underflow
+    ! We assume that overflow is unlikely because x is always on the order of one
+    real(4), parameter :: boost = 2.**33 ! Shifts exponent by ~ 1e+10
+    real(4), parameter :: inv_boost = 2.**(-33) ! Shifts exponent back
 
     do o = 1, layer%output_width
       ! Add bias
@@ -521,9 +523,12 @@ subroutine ANN_apply_array_sio_r4(nij, x, y, CS)
       do i = 1, layer%input_width
         y(:,o) = y(:,o) + (x(:,i) * boost) * layer%A_r4(o, i)
       enddo
-      y(:,o) = y(:,o) * inv_boost
       ! Apply activation function
-      if (layer%activation) y(:,o) = activation_fn_r4(y(:,o))
+      if (layer%activation) then
+        y(:,o) = activation_fn_r4(y(:,o) * inv_boost)
+      else
+        y(:,o) = y(:,o) * inv_boost
+      endif
     enddo
 
   end subroutine layer_apply_sio
@@ -789,6 +794,9 @@ logical function ANN_unit_tests(verbose)
     call ANN_apply_array_sio(20, x2, y2, ANN)
     rand_res = rand_res .or. maxval( abs( maxval(y2(:,:),1) - y_good(:) ) ) > 0. ! Check results from array v2 = v1
     rand_res = rand_res .or. maxval( abs( minval(y2(:,:),1) - y_good(:) ) ) > 0. ! Check results from array v2 = v1
+    call ANN_apply_array_sio_r4(20, x2, y2, ANN)
+    rand_res = rand_res .or. maxval( abs( maxval(y2(:,:),1) - y_good(:) ) ) > 1.e-5 ! Lower Real(4) precision
+    rand_res = rand_res .or. maxval( abs( minval(y2(:,:),1) - y_good(:) ) ) > 1.e-5 ! Lower Real(4) precision
     deallocate( x, y, y_good, x2, y2 )
     call ANN_end(ANN)
   enddo
