@@ -750,7 +750,7 @@ subroutine compute_stress_ANN_collocated(G, GV, CS)
       x(m,2*stencil_points+1:3*stencil_points) =                                         &
                         RESHAPE(vort_xy_h(i-offset:i+offset,                             &
                                           j-offset:j+offset,k), (/stencil_points/))
-      
+
       x(m,:) = x(m,:) / (norm_h(i,j,k) + CS%subroundoff_shear)
     enddo; enddo
 
